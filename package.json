@@ -1,0 +1,33 @@
+{
+  "name": "cfd",
+  "version": "0.1.0",
+  "description": "CLI + MCP server for CodeFromDesign — sync Figma-to-code pipeline results with Claude Code",
+  "type": "module",
+  "bin": {
+    "cfd": "./dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx src/cli.ts",
+    "start": "node dist/cli.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.27.1",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0"
+  },
+  "files": [
+    "dist"
+  ],
+  "keywords": [
+    "codefromdesign",
+    "figma",
+    "mcp",
+    "claude-code"
+  ],
+  "license": "MIT"
+}
