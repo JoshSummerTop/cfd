@@ -5,8 +5,10 @@ CLI + MCP server for [CodeFromDesign](https://codefromdesign.com) — sync Figma
 ## Install
 
 ```bash
-npm install -g cfd
+npm install -g github:JoshSummerTop/cfd
 ```
+
+Requires Node.js 18 or later.
 
 ## Setup
 
@@ -52,6 +54,15 @@ Claude Code → reads screenshots, refines HTML, calls compare
 cfd compare → engine screenshots HTML, diffs against Figma
                                                               ↓
 repeat until parity > 95% → submit → build → production website
+```
+
+## Development
+
+```bash
+npm install               # install dependencies
+npm run dev -- --help     # run CLI from source via tsx
+npm run build             # bundle with esbuild
+npm run build:check       # type-check without emitting
 ```
 
 ## Environment Variables

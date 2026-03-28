@@ -1,6 +1,9 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
+import { readFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { join } from "node:path";
 import { loadConfig } from "./config.js";
 import { engineFetch } from "./engine.js";
 import { syncJob, getWorkspacePath } from "./sync.js";
@@ -155,10 +158,7 @@ to download the updated images if you want to view them locally.`,
       try {
         // Read cleaned.html from workspace
         const wsPath = getWorkspacePath(jobId);
-        const cleanedPath = `${wsPath}/frames/${frameIndex}/cleaned.html`;
-
-        const { readFile } = await import("node:fs/promises");
-        const { existsSync } = await import("node:fs");
+        const cleanedPath = join(wsPath, "frames", String(frameIndex), "cleaned.html");
 
         if (!existsSync(cleanedPath)) {
           return {
