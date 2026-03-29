@@ -5,7 +5,7 @@ CLI + MCP server for [CodeFromDesign](https://codefromdesign.com) — sync Figma
 ## Install
 
 ```bash
-npm install -g github:JoshSummerTop/cfd
+npm install -g @codefromdesign/cfd
 ```
 
 Requires Node.js 18 or later.

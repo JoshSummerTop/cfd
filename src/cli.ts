@@ -88,9 +88,11 @@ async function setupMcpConfig() {
 
   if (!settings.mcpServers) settings.mcpServers = {};
 
+  // Use absolute path to avoid PATH/fnm/shim issues in Claude Code's spawn context
+  const cliPath = process.argv[1];
   settings.mcpServers["cfd"] = {
-    command: "cfd",
-    args: ["serve"],
+    command: "node",
+    args: [cliPath, "serve"],
   };
 
   await writeFile(settingsPath, JSON.stringify(settings, null, 2) + "\n");

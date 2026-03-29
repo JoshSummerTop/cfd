@@ -1,6 +1,6 @@
 {
-  "name": "cfd",
-  "version": "0.1.0",
+  "name": "@codefromdesign/cfd",
+  "version": "0.1.1",
   "description": "CLI + MCP server for CodeFromDesign — sync Figma-to-code pipeline results with Claude Code",
   "type": "module",
   "bin": {
@@ -9,11 +9,14 @@
   "engines": {
     "node": ">=18.0.0"
   },
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
-    "build": "npx esbuild src/cli.ts --bundle --platform=node --target=node18 --format=esm --outfile=dist/cli.js --minify",
+    "build": "esbuild src/cli.ts --bundle --platform=node --target=node18 --format=esm --outfile=dist/cli.js --minify",
+    "prepublishOnly": "npm run build",
     "build:check": "tsc --noEmit",
     "dev": "tsx src/cli.ts",
-    "prepare": "node node_modules/esbuild/bin/esbuild src/cli.ts --bundle --platform=node --target=node18 --format=esm --outfile=dist/cli.js --minify",
     "start": "node dist/cli.js"
   },
   "devDependencies": {
