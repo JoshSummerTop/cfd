@@ -85,7 +85,7 @@ When the main agent builds all pages serially, it gets fatigued and starts cutti
    - Must achieve parity > 95% before submitting
 3. **Phase 3 (Main agent):** Review all completed pages, ensure consistent navigation, call build or submit_website
 
-**Max 2 concurrent background agents.** Queue remaining pages and launch them as agents complete. This keeps resource usage reasonable while still preventing main-agent fatigue.
+**Max 2 concurrent background agents** (unless the user explicitly asks for more). Queue remaining pages and launch them as agents complete. This keeps usage costs reasonable while still preventing main-agent fatigue.
 
 ### Agent prompt template
 When delegating a page to a background agent, provide:
@@ -157,6 +157,8 @@ For each frame:
 **Do not submit a frame until you have iterated it to high parity.** The compare tool returns a parity score and category breakdown after each iteration. Keep refining until satisfied.
 
 **Minimum 2 iterations per frame.** Your first pass will never be perfect. Always compare, read the diff, fix issues, and compare again. If you submit after a single pass without comparing, you are doing it wrong.
+
+**Maximum 5 iterations per frame.** If after 5 compare iterations you still haven't reached 95% parity, STOP and notify the user. Report the current parity score, what the remaining issues are (based on the diff colors), and ask for guidance. Do NOT keep iterating endlessly — diminishing returns burn usage quickly.
 
 ---
 
@@ -407,5 +409,5 @@ build {jobId}                     → assemble website
 - [ ] No inline styles
 - [ ] All images and SVGs referenced correctly
 - [ ] Navigation links present and correct
-- [ ] Parity score > 95% after at least 2 compare iterations
+- [ ] Parity score > 95% after 2-5 compare iterations (stop at 5 and notify user if not reached)
 `;
