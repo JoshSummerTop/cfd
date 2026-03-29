@@ -89,7 +89,11 @@ async function setupMcpConfig() {
     try { execSync("claude mcp remove cfd", { stdio: "ignore" }); } catch {}
 
     // Register using claude mcp add-json (user scope = available in all projects)
-    execSync(`claude mcp add-json cfd '${configJson}' --scope user`, { stdio: "inherit" });
+    // On Windows, single quotes don't work in cmd.exe — use double quotes with escaped inner quotes
+    const escapedJson = isWindows
+      ? `"${configJson.replace(/"/g, '\\"')}"`
+      : `'${configJson}'`;
+    execSync(`claude mcp add-json cfd ${escapedJson} --scope user`, { stdio: "inherit" });
     console.log("MCP server registered with Claude Code");
   } catch {
     // Fallback: write to ~/.claude.json directly if claude CLI isn't available
