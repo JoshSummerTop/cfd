@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { loadConfig } from "./config.js";
 import { engineFetch } from "./engine.js";
 import { syncJob, getWorkspacePath } from "./sync.js";
-import { submitFrame, buildWebsite } from "./submit.js";
+import { submitFrame, buildWebsite, uploadWebsite } from "./submit.js";
 
 export async function startMcpServer(): Promise<void> {
   const config = await loadConfig();
@@ -132,6 +132,31 @@ The engine assembles a production website from the frame data.`,
         return { content: [{ type: "text", text: result }] };
       } catch (err: any) {
         return { content: [{ type: "text", text: `Build failed: ${err.message}` }] };
+      }
+    }
+  );
+
+  // --- Tool: submit_website ---
+  server.tool(
+    "submit_website",
+    `Upload a locally-built website to the engine so it can be viewed in the CodeFromDesign web app.
+
+After building website files locally (HTML, CSS, JS, images), call this tool with:
+- The job ID the website was built from
+- The absolute path to the directory containing the website files
+
+The tool reads all files, uploads them to the engine, and creates a build record.
+The website will then be viewable in the CodeFromDesign web app's website preview.`,
+    {
+      jobId: z.string().describe("The job ID this website was built from"),
+      directory: z.string().describe("Absolute path to the directory containing the built website files (HTML, CSS, JS, images)"),
+    },
+    async ({ jobId, directory }) => {
+      try {
+        const result = await uploadWebsite(config, jobId, directory);
+        return { content: [{ type: "text", text: result }] };
+      } catch (err: any) {
+        return { content: [{ type: "text", text: `Upload failed: ${err.message}` }] };
       }
     }
   );
