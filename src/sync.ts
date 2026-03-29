@@ -1,7 +1,208 @@
 import { mkdir, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { getCfdDir, type CfdConfig } from "./config.js";
 import { engineFetch } from "./engine.js";
+
+// ---------------------------------------------------------------------------
+// Build guide generation — groups frames by page and classifies breakpoints
+// ---------------------------------------------------------------------------
+
+interface FrameInfo {
+  index: number;
+  name: string;
+  page: string;
+  width: number;
+  height: number;
+  parityScore?: number;
+}
+
+interface PageGroup {
+  name: string;
+  slug: string;
+  outputFile: string;
+  frames: Record<string, { index: number; width: number; height: number }>;
+}
+
+function classifyBreakpoint(width: number): string {
+  if (width >= 1200) return "desktop";
+  if (width >= 700) return "laptop";
+  return "mobile";
+}
+
+function parseFrameName(name: string): { pageName: string; breakpoint: string } | null {
+  // Common patterns:
+  //   "Home Page - Desktop"
+  //   "Sign Up Page - Mobile"
+  //   "About Page - Laptop"
+  //   "Home - Desktop 1920"
+  //   "Home / Desktop"
+  const separators = [" - ", " — ", " / "];
+  for (const sep of separators) {
+    const idx = name.lastIndexOf(sep);
+    if (idx !== -1) {
+      let pagePart = name.slice(0, idx).trim();
+      const bpPart = name.slice(idx + sep.length).trim().toLowerCase();
+
+      // Strip trailing " Page" from page name
+      pagePart = pagePart.replace(/\s+Page$/i, "");
+
+      // Determine breakpoint from the text
+      let breakpoint: string;
+      if (bpPart.includes("desktop") || bpPart.includes("1920") || bpPart.includes("1440")) {
+        // If "1440" appears but not "desktop", treat as laptop
+        if (bpPart.includes("1440") && !bpPart.includes("desktop")) {
+          breakpoint = "laptop";
+        } else {
+          breakpoint = "desktop";
+        }
+      } else if (bpPart.includes("laptop") || bpPart.includes("tablet")) {
+        breakpoint = "laptop";
+      } else if (bpPart.includes("mobile") || bpPart.includes("phone") || bpPart.includes("375") || bpPart.includes("390")) {
+        breakpoint = "mobile";
+      } else {
+        breakpoint = "unknown";
+      }
+
+      return { pageName: pagePart, breakpoint };
+    }
+  }
+  return null;
+}
+
+function slugify(name: string): string {
+  return name
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-|-$/g, "");
+}
+
+function generateBuildGuide(
+  frames: FrameInfo[],
+  wsPath: string,
+): object {
+  // Group frames by page
+  const pageMap = new Map<string, PageGroup>();
+
+  for (const frame of frames) {
+    // Try parsing the frame name first
+    const parsed = parseFrameName(frame.name);
+
+    let pageName: string;
+    let breakpoint: string;
+
+    if (parsed) {
+      pageName = parsed.pageName;
+      breakpoint = parsed.breakpoint === "unknown"
+        ? classifyBreakpoint(frame.width)
+        : parsed.breakpoint;
+    } else {
+      // Fallback: use full name as page, classify breakpoint by width
+      pageName = frame.name.replace(/\s+Page$/i, "");
+      breakpoint = classifyBreakpoint(frame.width);
+    }
+
+    if (!pageMap.has(pageName)) {
+      const slug = slugify(pageName);
+      pageMap.set(pageName, {
+        name: pageName,
+        slug,
+        outputFile: slug === "home" ? "index.html" : `pages/${slug}.html`,
+        frames: {},
+      });
+    }
+
+    const group = pageMap.get(pageName)!;
+    group.frames[breakpoint] = {
+      index: frame.index,
+      width: frame.width,
+      height: frame.height,
+    };
+  }
+
+  // Sort pages: Home first, then alphabetical
+  const pages = Array.from(pageMap.values()).sort((a, b) => {
+    if (a.slug === "home") return -1;
+    if (b.slug === "home") return 1;
+    return a.name.localeCompare(b.name);
+  });
+
+  // If no page is named "home", make the first one index.html
+  if (pages.length > 0 && pages[0].slug !== "home") {
+    pages[0].outputFile = "index.html";
+  }
+
+  // Derive breakpoint CSS rules from actual frame widths
+  const allWidths = frames.map((f) => f.width);
+  const desktopWidth = Math.max(...allWidths.filter((w) => w >= 1200));
+  const laptopWidth = Math.max(...allWidths.filter((w) => w >= 700 && w < 1200), 0) ||
+    Math.min(...allWidths.filter((w) => w >= 1200));
+  const mobileWidth = Math.max(...allWidths.filter((w) => w < 700), 0);
+
+  const breakpoints: Record<string, object> = {
+    desktop: {
+      width: desktopWidth || 1920,
+      cssRule: "default (no media query)",
+    },
+  };
+
+  if (laptopWidth && laptopWidth < desktopWidth) {
+    breakpoints.laptop = {
+      width: laptopWidth,
+      cssRule: `@media (max-width: ${laptopWidth}px)`,
+    };
+  }
+
+  if (mobileWidth && mobileWidth < 700) {
+    breakpoints.mobile = {
+      width: mobileWidth,
+      cssRule: `@media (max-width: ${Math.min(mobileWidth + 90, 480)}px)`,
+    };
+  }
+
+  // Navigation = page names in order
+  const navigation = pages.map((p) => p.name);
+
+  return {
+    pages,
+    navigation,
+    breakpoints,
+    outputStructure: {
+      root: "website/",
+      sharedCss: "css/styles.css",
+      images: "images/",
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Log structure creation
+// ---------------------------------------------------------------------------
+
+async function createLogStructure(wsPath: string, jobMeta: any): Promise<void> {
+  const logsDir = join(wsPath, "logs");
+  const framesLogDir = join(logsDir, "frames");
+
+  await mkdir(logsDir, { recursive: true });
+  await mkdir(framesLogDir, { recursive: true });
+
+  // Only write initial session-log.md if it doesn't exist yet
+  const sessionLogPath = join(logsDir, "session-log.md");
+  if (!existsSync(sessionLogPath)) {
+    const frameCount = jobMeta.frames?.length ?? 0;
+    const initialLog = [
+      `# Session Log — Job ${jobMeta.id}`,
+      ``,
+      `**Figma URL:** ${jobMeta.figmaUrl || "n/a"}`,
+      `**Frames:** ${frameCount}`,
+      `**Created:** ${jobMeta.createdAt || "n/a"}`,
+      ``,
+      `---`,
+      ``,
+    ].join("\n");
+    await writeFile(sessionLogPath, initialLog);
+  }
+}
 
 const WORKSPACE_BASE = () => join(getCfdDir(), "workspace");
 
@@ -171,6 +372,24 @@ export async function syncJob(
 
     console.error(`[cfd] synced frame ${i}/${frames.length - 1}: ${frame.name}`);
   }
+
+  // Generate build guide (page-to-frame mapping, breakpoints, output structure)
+  const frameInfos: FrameInfo[] = frames.map((f: any, i: number) => ({
+    index: i,
+    name: f.name || `Frame ${i}`,
+    page: f.page || "Page 1",
+    width: f.width,
+    height: f.height,
+    parityScore: f.parityScore,
+  }));
+
+  const buildGuide = generateBuildGuide(frameInfos, wsPath);
+  await writeFile(join(wsPath, "build-guide.json"), JSON.stringify(buildGuide, null, 2));
+  console.error(`[cfd] generated build-guide.json`);
+
+  // Create log structure for session tracking
+  await createLogStructure(wsPath, jobMeta);
+  console.error(`[cfd] created logs/ directory structure`);
 
   console.error(`[cfd] sync complete: ${frames.length} frames -> ${wsPath}`);
 

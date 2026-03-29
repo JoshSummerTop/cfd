@@ -69,7 +69,8 @@ export async function startMcpServer(): Promise<void> {
               `Directory structure:`,
               `  ${result.workspacePath}/`,
               `    job.json                    -- job metadata + frame summaries`,
-              `    conversion-instructions.md  -- methodology for cleaning frames`,
+              `    build-guide.json            -- page-to-frame mapping, breakpoints, output structure`,
+              `    logs/                       -- session and frame logs (see instructions)`,
               `    frames/`,
               ...result.frames.map((f) =>
                 `      ${f.index}/                   -- ${f.name} (${f.width}x${f.height}, parity: ${f.parity})`
@@ -83,7 +84,8 @@ export async function startMcpServer(): Promise<void> {
               `  diff.png              -- pixel diff overlay`,
               `  manifest.json         -- component/section metadata (if available)`,
               ``,
-              `Use Claude Code's Read tool to examine these files. Start with job.json for an overview.`,
+              `Read build-guide.json for the website assembly plan (page-to-frame mapping, breakpoints, output structure).`,
+              `Read job.json for an overview of all frames and parity scores.`,
             ].join("\n"),
           }],
         };
