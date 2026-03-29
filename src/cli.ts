@@ -2,8 +2,9 @@
 
 import { writeFile, readFile, mkdir } from "node:fs/promises";
 import { existsSync } from "node:fs";
+import { execSync } from "node:child_process";
 import { join } from "node:path";
-import { homedir } from "node:os";
+import { homedir, platform } from "node:os";
 import { loadConfig, saveConfig, DEFAULT_ENGINE_URL } from "./config.js";
 import { engineFetch } from "./engine.js";
 import { syncJob } from "./sync.js";
@@ -71,32 +72,45 @@ async function cmdInit() {
 }
 
 async function setupMcpConfig() {
-  // Write to the user's global Claude Code MCP settings
-  const claudeDir = join(homedir(), ".claude");
-  const settingsPath = join(claudeDir, "settings.json");
-
-  await mkdir(claudeDir, { recursive: true });
-
-  let settings: any = {};
-  if (existsSync(settingsPath)) {
-    try {
-      settings = JSON.parse(await readFile(settingsPath, "utf-8"));
-    } catch {
-      settings = {};
-    }
-  }
-
-  if (!settings.mcpServers) settings.mcpServers = {};
-
-  // Use absolute path to avoid PATH/fnm/shim issues in Claude Code's spawn context
+  // Register MCP server with Claude Code using the official CLI command.
+  // This writes to ~/.claude.json (the correct location), not settings.json.
   const cliPath = process.argv[1];
-  settings.mcpServers["cfd"] = {
-    command: "node",
-    args: [cliPath, "serve"],
-  };
+  const isWindows = platform() === "win32";
 
-  await writeFile(settingsPath, JSON.stringify(settings, null, 2) + "\n");
-  console.log(`MCP server registered in ${settingsPath}`);
+  // On Windows, node must be spawned via "cmd /c" for Claude Code's process manager
+  const mcpConfig = isWindows
+    ? { command: "cmd", args: ["/c", "node", cliPath, "serve"] }
+    : { command: "node", args: [cliPath, "serve"] };
+
+  const configJson = JSON.stringify(mcpConfig);
+
+  try {
+    // Remove existing entry first (ignore errors if it doesn't exist)
+    try { execSync("claude mcp remove cfd", { stdio: "ignore" }); } catch {}
+
+    // Register using claude mcp add-json (user scope = available in all projects)
+    execSync(`claude mcp add-json cfd '${configJson}' --scope user`, { stdio: "inherit" });
+    console.log("MCP server registered with Claude Code");
+  } catch {
+    // Fallback: write to ~/.claude.json directly if claude CLI isn't available
+    console.log("Claude CLI not found. Writing MCP config directly...");
+    const claudeJsonPath = join(homedir(), ".claude.json");
+
+    let claudeJson: any = {};
+    if (existsSync(claudeJsonPath)) {
+      try {
+        claudeJson = JSON.parse(await readFile(claudeJsonPath, "utf-8"));
+      } catch {
+        claudeJson = {};
+      }
+    }
+
+    if (!claudeJson.mcpServers) claudeJson.mcpServers = {};
+    claudeJson.mcpServers["cfd"] = mcpConfig;
+
+    await writeFile(claudeJsonPath, JSON.stringify(claudeJson, null, 2) + "\n");
+    console.log(`MCP server registered in ${claudeJsonPath}`);
+  }
 }
 
 // ── list ─────────────────────────────────────────────────────────────────────
