@@ -8,14 +8,15 @@ import { loadConfig } from "./config.js";
 import { engineFetch } from "./engine.js";
 import { syncJob, getWorkspacePath } from "./sync.js";
 import { submitFrame, buildWebsite, uploadWebsite } from "./submit.js";
+import { MCP_INSTRUCTIONS } from "./instructions.js";
 
 export async function startMcpServer(): Promise<void> {
   const config = await loadConfig();
 
-  const server = new McpServer({
-    name: "cfd",
-    version: "0.1.0",
-  });
+  const server = new McpServer(
+    { name: "cfd", version: "0.3.0" },
+    { instructions: MCP_INSTRUCTIONS },
+  );
 
   // --- Tool: list ---
   server.tool(
@@ -49,12 +50,7 @@ export async function startMcpServer(): Promise<void> {
   // --- Tool: sync ---
   server.tool(
     "sync",
-    `Sync a completed job's frame data to the local workspace.
-
-Downloads for each frame: rendered HTML, Figma screenshot, rendered screenshot, pixel diff, metadata, and manifest.
-
-After sync, all files are at: ~/.codefromdesign/workspace/{jobId}/
-Claude Code can then read these files directly using its native Read tool.`,
+    "Sync a job's frame data to the local workspace. Downloads HTML, screenshots, diffs, metadata, images, and SVGs for each frame.",
     {
       jobId: z.string().describe("The job ID to sync"),
     },
@@ -100,10 +96,7 @@ Claude Code can then read these files directly using its native Read tool.`,
   // --- Tool: submit_cleaned_frame ---
   server.tool(
     "submit_cleaned_frame",
-    `Submit cleaned HTML for a specific frame back to the engine.
-
-Reads cleaned HTML from the workspace (frames/{idx}/cleaned.html) and uploads it.
-Claude Code should write the cleaned HTML to this path before calling this tool.`,
+    "Submit cleaned HTML for a frame. Reads from workspace frames/{idx}/cleaned.html and uploads to the engine.",
     {
       jobId: z.string().describe("The job ID"),
       frameIndex: z.number().describe("The frame index (0-based)"),
@@ -121,8 +114,7 @@ Claude Code should write the cleaned HTML to this path before calling this tool.
   // --- Tool: build ---
   server.tool(
     "build",
-    `Trigger website build from the cleaned frames of a completed job.
-The engine assembles a production website from the frame data.`,
+    "Trigger website build from cleaned frames. The engine assembles a production website.",
     {
       jobId: z.string().describe("The job ID to build a website from"),
     },
@@ -139,14 +131,7 @@ The engine assembles a production website from the frame data.`,
   // --- Tool: submit_website ---
   server.tool(
     "submit_website",
-    `Upload a locally-built website to the engine so it can be viewed in the CodeFromDesign web app.
-
-After building website files locally (HTML, CSS, JS, images), call this tool with:
-- The job ID the website was built from
-- The absolute path to the directory containing the website files
-
-The tool reads all files, uploads them to the engine, and creates a build record.
-The website will then be viewable in the CodeFromDesign web app's website preview.`,
+    "Upload a locally-built website directory to the engine. Reads all files (HTML, CSS, JS, images) and creates a build record viewable in the web app.",
     {
       jobId: z.string().describe("The job ID this website was built from"),
       directory: z.string().describe("Absolute path to the directory containing the built website files (HTML, CSS, JS, images)"),
@@ -164,17 +149,7 @@ The website will then be viewable in the CodeFromDesign web app's website previe
   // --- Tool: compare ---
   server.tool(
     "compare",
-    `Screenshot and compare cleaned HTML against the Figma reference for a frame.
-
-This is the core iteration tool. After writing cleaned.html for a frame:
-1. Call compare — engine screenshots your HTML with Chrome, diffs against the Figma design
-2. Read the returned parity score and diff description to see what's wrong
-3. Adjust your HTML/CSS
-4. Call compare again
-5. Repeat until parity is high (>95%)
-
-The engine stores the screenshot and diff images. After comparing, call sync
-to download the updated images if you want to view them locally.`,
+    "Screenshot cleaned.html and diff against the Figma reference. Returns parity score and category breakdown. Call sync after to download updated diff images.",
     {
       jobId: z.string().describe("The job ID"),
       frameIndex: z.number().describe("The frame index (0-based)"),

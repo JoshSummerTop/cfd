@@ -60,22 +60,6 @@ export async function syncJob(
   };
   await writeFile(join(wsPath, "job.json"), JSON.stringify(jobMeta, null, 2));
 
-  // Fetch instruction documents from engine
-  for (const doc of [
-    { endpoint: "/api/conversion-instructions", filename: "conversion-instructions.md" },
-    { endpoint: "/api/claude-instructions", filename: "INSTRUCTIONS.md" },
-  ]) {
-    try {
-      const res = await engineFetch(config, doc.endpoint);
-      if (res.ok) {
-        const text = await res.text();
-        await writeFile(join(wsPath, doc.filename), text);
-      }
-    } catch {
-      // Not critical
-    }
-  }
-
   // Sync each frame
   const frames = job.frames || [];
   const frameSummaries: Array<{ index: number; name: string; width: number; height: number; parity: string }> = [];
