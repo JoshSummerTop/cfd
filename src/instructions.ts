@@ -458,6 +458,43 @@ Green areas in the diff = image problems. Yellow areas = SVG/icon problems. If y
 - Are SVGs the right color and size?`;
 
 // ---------------------------------------------------------------------------
+// Section: Snips — User-Reported Issues
+// ---------------------------------------------------------------------------
+const SNIPS = `## Snips — User-Reported Visual Issues
+
+The user can visually highlight problem areas in the CodeFromDesign web app using the **snip tool**. Each snip is a cropped screenshot of a specific region with metadata about where it came from.
+
+### How snips work
+
+1. The user selects an area on a frame or website preview in the web app
+2. A cropped PNG + metadata is saved to \`{workspace}/snips/snip-{timestamp}.png\` and \`.json\`
+3. The user pastes text context into Claude Code that looks like:
+\`\`\`
+type: frame
+frame: #3 "Security Page - Desktop"
+source: diff
+region: (200, 100) → (800, 500) px
+parity: 92.1%
+top-issue: wrong_background
+image: /path/to/snips/snip-1711734000.png
+\`\`\`
+
+### When the user pastes snip context
+
+If you receive text with an \`image:\` path pointing to a snip PNG:
+1. **Read the image** at that path using Claude Code's Read tool — it shows you exactly what the user is pointing at
+2. **Use the metadata** (frame index, source, region coordinates) to locate the issue in the code
+3. **Fix the specific problem** the user highlighted — don't guess, look at the image
+
+### Checking for snips proactively
+
+When starting work on a job, call \`get_snips\` to check if the user has flagged any problem areas. Address snips before doing general iteration — they represent specific user-reported issues that take priority.
+
+### After fixing a snip
+
+Once the issue is resolved (confirmed by a compare showing improvement), call \`clear_snips\` to clean up. This prevents stale snips from cluttering future sessions.`;
+
+// ---------------------------------------------------------------------------
 // Section: Output Format
 // ---------------------------------------------------------------------------
 const OUTPUT_FORMAT = `## Output Format
@@ -565,6 +602,8 @@ const TOOLS_REFERENCE = `## MCP Tools Reference
 | \`submit_cleaned_frame\` | Upload final cleaned HTML for a frame |
 | \`build\` | Trigger website assembly from all cleaned frames |
 | \`submit_website\` | Upload a locally-built website directory to the engine |
+| \`get_snips\` | List user-reported visual issues (snips) with cropped screenshots |
+| \`clear_snips\` | Remove all snips for a job after issues are resolved |
 | \`workspace_path\` | Get the local path to a job's workspace |
 
 ### Typical session
@@ -620,6 +659,7 @@ export const MCP_INSTRUCTIONS = [
   PHASE_D_SUBMIT,
   DIFF_SYSTEM,
   IMAGES_AND_SVGS,
+  SNIPS,
   OUTPUT_FORMAT,
   CSS_ARCHITECTURE,
   BEM_NAMING,

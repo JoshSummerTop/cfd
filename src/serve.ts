@@ -1,7 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { readFile } from "node:fs/promises";
+import { readFile, readdir, rm } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { loadConfig } from "./config.js";
@@ -218,6 +218,93 @@ export async function startMcpServer(): Promise<void> {
         return { content: [{ type: "text", text: lines.join("\n") }] };
       } catch (err: any) {
         return { content: [{ type: "text", text: `Compare failed: ${err.message}` }] };
+      }
+    }
+  );
+
+  // --- Tool: get_snips ---
+  server.tool(
+    "get_snips",
+    "Get visual snips (user-reported problem areas) from the CodeFromDesign web app. Returns cropped screenshots with metadata showing exactly what the user flagged. Check this when starting work or when the user pastes snip context.",
+    {
+      jobId: z.string().describe("The job ID"),
+    },
+    async ({ jobId }) => {
+      const snipsDir = join(getWorkspacePath(jobId), "snips");
+      if (!existsSync(snipsDir)) {
+        return { content: [{ type: "text", text: "No snips found. The user can create snips using the snip tool in the CodeFromDesign web app." }] };
+      }
+
+      try {
+        const files = await readdir(snipsDir);
+        const jsonFiles = files.filter((f) => f.endsWith(".json")).sort().reverse();
+
+        if (jsonFiles.length === 0) {
+          return { content: [{ type: "text", text: "No snips found." }] };
+        }
+
+        // Build content array with text metadata + inline images
+        const content: Array<{ type: "text"; text: string } | { type: "image"; data: string; mimeType: string }> = [];
+
+        content.push({ type: "text", text: `Found ${jsonFiles.length} snip(s) for job ${jobId}:\n` });
+
+        for (const file of jsonFiles) {
+          try {
+            const raw = await readFile(join(snipsDir, file), "utf-8");
+            const snip = JSON.parse(raw);
+
+            // Add metadata as text
+            const lines: string[] = [`--- Snip (${new Date(snip.timestamp).toISOString()}) ---`];
+            for (const [key, val] of Object.entries(snip)) {
+              if (key !== "timestamp") {
+                lines.push(`  ${key}: ${val}`);
+              }
+            }
+            content.push({ type: "text", text: lines.join("\n") });
+
+            // Add the cropped image inline if it exists
+            if (snip.imagePath && existsSync(snip.imagePath)) {
+              const imgData = await readFile(snip.imagePath);
+              content.push({
+                type: "image",
+                data: imgData.toString("base64"),
+                mimeType: "image/png",
+              });
+            }
+
+            content.push({ type: "text", text: "" });
+          } catch {
+            // skip malformed files
+          }
+        }
+
+        content.push({ type: "text", text: "Address these snips — they are user-reported issues that take priority." });
+
+        return { content };
+      } catch (err: any) {
+        return { content: [{ type: "text", text: `Failed to read snips: ${err.message}` }] };
+      }
+    }
+  );
+
+  // --- Tool: clear_snips ---
+  server.tool(
+    "clear_snips",
+    "Remove all snips for a job. Call this after the user-reported issues have been resolved and confirmed via compare.",
+    {
+      jobId: z.string().describe("The job ID"),
+    },
+    async ({ jobId }) => {
+      const snipsDir = join(getWorkspacePath(jobId), "snips");
+      if (!existsSync(snipsDir)) {
+        return { content: [{ type: "text", text: "No snips directory found — nothing to clear." }] };
+      }
+
+      try {
+        await rm(snipsDir, { recursive: true });
+        return { content: [{ type: "text", text: `Cleared all snips for job ${jobId}.` }] };
+      } catch (err: any) {
+        return { content: [{ type: "text", text: `Failed to clear snips: ${err.message}` }] };
       }
     }
   );
