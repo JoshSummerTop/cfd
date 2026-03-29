@@ -10,10 +10,9 @@
     "node": ">=18.0.0"
   },
   "scripts": {
-    "build": "esbuild src/cli.ts --bundle --platform=node --target=node18 --format=esm --outfile=dist/cli.js --minify",
+    "build": "npx esbuild src/cli.ts --bundle --platform=node --target=node18 --format=esm --outfile=dist/cli.js --minify",
     "build:check": "tsc --noEmit",
     "dev": "tsx src/cli.ts",
-    "prepare": "npm run build",
     "start": "node dist/cli.js"
   },
   "devDependencies": {
