@@ -1,6 +1,6 @@
 {
   "name": "@codefromdesign/cfd",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "CLI + MCP server for CodeFromDesign — sync Figma-to-code pipeline results with Claude Code",
   "type": "module",
   "bin": {

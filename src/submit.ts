@@ -94,12 +94,13 @@ export async function uploadWebsite(
     files.push({ path: relPath, content: data.toString("base64") });
 
     // Track HTML pages for the pages array
+    // route must be the file path (e.g. "index.html", "pages/about.html") since the
+    // web app uses it directly as the iframe src path via websiteFileUrl(jobId, route)
     if (relPath.endsWith(".html")) {
       const name = relPath === "index.html"
         ? "Home"
         : relPath.replace(/\.html$/, "").replace(/^pages\//, "").replace(/(^|\/)(\w)/g, (_, sep, c) => sep + c.toUpperCase());
-      const route = relPath === "index.html" ? "/" : "/" + relPath.replace(/\.html$/, "").replace(/\/index$/, "");
-      htmlPages.push({ name, route });
+      htmlPages.push({ name, route: relPath });
     }
   }
 
