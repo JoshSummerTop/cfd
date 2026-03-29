@@ -13,7 +13,7 @@
     "build": "npx esbuild src/cli.ts --bundle --platform=node --target=node18 --format=esm --outfile=dist/cli.js --minify",
     "build:check": "tsc --noEmit",
     "dev": "tsx src/cli.ts",
-    "prepare": "npx esbuild src/cli.ts --bundle --platform=node --target=node18 --format=esm --outfile=dist/cli.js --minify",
+    "prepare": "node node_modules/esbuild/bin/esbuild src/cli.ts --bundle --platform=node --target=node18 --format=esm --outfile=dist/cli.js --minify",
     "start": "node dist/cli.js"
   },
   "devDependencies": {
