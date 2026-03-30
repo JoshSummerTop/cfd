@@ -205,6 +205,176 @@ async function createLogStructure(wsPath: string, jobMeta: any): Promise<void> {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Per-frame sync — shared between full sync and single-frame sync
+// ---------------------------------------------------------------------------
+
+export interface FrameSummary {
+  index: number;
+  name: string;
+  width: number;
+  height: number;
+  parity: string;
+  images: string;
+  warnings?: string[];
+}
+
+const CRITICAL_ARTIFACTS = new Set(["ai-ready.html", "figma-screenshot.png", "rendered.html"]);
+
+async function syncFrameArtifacts(
+  config: CfdConfig,
+  jobId: string,
+  frameIndex: number,
+  frame: any,
+  frameDir: string,
+): Promise<FrameSummary> {
+  await mkdir(frameDir, { recursive: true });
+
+  // Write frame metadata (trim name — Figma sometimes adds trailing whitespace)
+  const frameName = (frame.name || `Frame ${frameIndex}`).trim();
+  const frameMeta = {
+    index: frameIndex,
+    name: frameName,
+    page: frame.page || "Page 1",
+    width: frame.width,
+    height: frame.height,
+    parityScore: frame.parityScore,
+    parityNonFont: frame.parityNonFont,
+    parityBreakdown: frame.parityBreakdown,
+    correctionIterations: frame.correctionIterations,
+    issues: frame.issues,
+  };
+  await writeFile(join(frameDir, "metadata.json"), JSON.stringify(frameMeta, null, 2));
+
+  // Download artifacts in parallel
+  const artifacts = [
+    { name: "rendered.html", endpoint: `/api/jobs/${jobId}/frames/${frameIndex}/html` },
+    { name: "figma-screenshot.png", endpoint: `/api/jobs/${jobId}/frames/${frameIndex}/figma-screenshot` },
+    { name: "screenshot.png", endpoint: `/api/jobs/${jobId}/frames/${frameIndex}/screenshot` },
+    { name: "diff.png", endpoint: `/api/jobs/${jobId}/frames/${frameIndex}/diff` },
+    { name: "manifest.json", endpoint: `/api/jobs/${jobId}/frames/${frameIndex}/manifest` },
+    { name: "ai-ready.html", endpoint: `/api/jobs/${jobId}/frames/${frameIndex}/ai-ready-html` },
+    { name: "cleaned-screenshot.png", endpoint: `/api/jobs/${jobId}/frames/${frameIndex}/cleaned-screenshot` },
+    { name: "cleaned-diff.png", endpoint: `/api/jobs/${jobId}/frames/${frameIndex}/cleaned-diff` },
+    { name: "compare-log.json", endpoint: `/api/jobs/${jobId}/frames/${frameIndex}/artifact/compare-log.json` },
+  ];
+
+  const missingCritical: string[] = [];
+
+  const artifactResults = await Promise.allSettled(
+    artifacts.map(async (art) => {
+      try {
+        const res = await engineFetch(config, art.endpoint);
+        if (res.ok) {
+          const data = Buffer.from(await res.arrayBuffer());
+          await writeFile(join(frameDir, art.name), data);
+          return { name: art.name, ok: true };
+        }
+        return { name: art.name, ok: false };
+      } catch {
+        return { name: art.name, ok: false };
+      }
+    })
+  );
+
+  for (const result of artifactResults) {
+    if (result.status === "fulfilled" && !result.value.ok && CRITICAL_ARTIFACTS.has(result.value.name)) {
+      missingCritical.push(result.value.name);
+    }
+  }
+
+  // Download issue-diff if available
+  try {
+    const issueRes = await engineFetch(config, `/api/jobs/${jobId}/frames/${frameIndex}/artifact/issue-diff.json`);
+    if (issueRes.ok) {
+      const data = Buffer.from(await issueRes.arrayBuffer());
+      await writeFile(join(frameDir, "issue-diff.json"), data);
+    }
+  } catch { /* skip */ }
+
+  // Download SVG map (image-map.json is handled below with image downloads + rewrite)
+  try {
+    const res = await engineFetch(config, `/api/jobs/${jobId}/frames/${frameIndex}/svg-map`);
+    if (res.ok) {
+      const data = Buffer.from(await res.arrayBuffer());
+      await writeFile(join(frameDir, "svg-map.json"), data);
+    }
+  } catch { /* skip */ }
+
+  // Download frame images and rewrite image-map.json with relative paths
+  let imagesDownloaded = 0;
+  let imagesTotal = 0;
+  try {
+    const mapRes = await engineFetch(config, `/api/jobs/${jobId}/frames/${frameIndex}/image-map`);
+    if (mapRes.ok) {
+      const imageMap: Record<string, string> = await mapRes.json();
+      imagesTotal = Object.keys(imageMap).length;
+      const imgDir = join(frameDir, "images");
+      await mkdir(imgDir, { recursive: true });
+
+      const rewrittenMap: Record<string, string> = {};
+
+      await Promise.allSettled(
+        Object.entries(imageMap).map(async ([ref, value]) => {
+          try {
+            const filename = value.split("/").pop() || value;
+            rewrittenMap[ref] = `images/${filename}`;
+            const imgRes = await engineFetch(config, `/api/jobs/${jobId}/frames/${frameIndex}/images/${filename}`);
+            if (imgRes.ok) {
+              const data = Buffer.from(await imgRes.arrayBuffer());
+              await writeFile(join(imgDir, filename), data);
+              imagesDownloaded++;
+            }
+          } catch { /* skip */ }
+        })
+      );
+
+      await writeFile(
+        join(frameDir, "image-map.json"),
+        JSON.stringify(rewrittenMap, null, 2),
+      );
+    }
+  } catch { /* skip */ }
+
+  const summary: FrameSummary = {
+    index: frameIndex,
+    name: frameName,
+    width: frame.width,
+    height: frame.height,
+    parity: `${(frame.parityScore ?? 0).toFixed(1)}%`,
+    images: `${imagesDownloaded}/${imagesTotal}`,
+    warnings: missingCritical.length > 0 ? missingCritical : undefined,
+  };
+
+  console.error(`[cfd] synced frame ${frameIndex}: ${summary.name} (images: ${imagesDownloaded}/${imagesTotal})`);
+  return summary;
+}
+
+// ---------------------------------------------------------------------------
+// Public: sync a single frame (used after compare to get updated artifacts)
+// ---------------------------------------------------------------------------
+
+export async function syncFrame(
+  config: CfdConfig,
+  jobId: string,
+  frameIndex: number,
+): Promise<FrameSummary> {
+  const jobRes = await engineFetch(config, `/api/jobs/${jobId}`);
+  if (!jobRes.ok) {
+    throw new Error(`Failed to fetch job: ${jobRes.status} ${jobRes.statusText}`);
+  }
+  const job = await jobRes.json();
+  const frames = job.frames || [];
+
+  if (frameIndex < 0 || frameIndex >= frames.length) {
+    throw new Error(`Frame index ${frameIndex} out of range (job has ${frames.length} frames)`);
+  }
+
+  const wsPath = getWorkspacePath(jobId);
+  const frameDir = join(wsPath, "frames", String(frameIndex));
+  return syncFrameArtifacts(config, jobId, frameIndex, frames[frameIndex], frameDir);
+}
+
 const WORKSPACE_BASE = () => join(getCfdDir(), "workspace");
 
 export function getWorkspacePath(jobId: string): string {
@@ -217,7 +387,7 @@ export async function syncJob(
 ): Promise<{
   workspacePath: string;
   frameCount: number;
-  frames: Array<{ index: number; name: string; width: number; height: number; parity: string; images: string }>;
+  frames: FrameSummary[];
 }> {
   const jobRes = await engineFetch(config, `/api/jobs/${jobId}`);
   if (!jobRes.ok) {
@@ -249,7 +419,7 @@ export async function syncJob(
     })),
     frames: job.frames?.map((f: any, i: number) => ({
       index: i,
-      name: f.name || `Frame ${i}`,
+      name: (f.name || `Frame ${i}`).trim(),
       page: f.page || "Page 1",
       width: f.width,
       height: f.height,
@@ -264,138 +434,18 @@ export async function syncJob(
 
   // Sync each frame
   const frames = job.frames || [];
-  const frameSummaries: Array<{ index: number; name: string; width: number; height: number; parity: string; images: string }> = [];
+  const frameSummaries: Array<FrameSummary> = [];
 
   for (let i = 0; i < frames.length; i++) {
     const frame = frames[i];
-    const frameDir = join(framesDir, String(i));
-    await mkdir(frameDir, { recursive: true });
-
-    // Write frame metadata
-    const frameMeta = {
-      index: i,
-      name: frame.name || `Frame ${i}`,
-      page: frame.page || "Page 1",
-      width: frame.width,
-      height: frame.height,
-      parityScore: frame.parityScore,
-      parityNonFont: frame.parityNonFont,
-      parityBreakdown: frame.parityBreakdown,
-      correctionIterations: frame.correctionIterations,
-      issues: frame.issues,
-    };
-    await writeFile(join(frameDir, "metadata.json"), JSON.stringify(frameMeta, null, 2));
-
-    // Download artifacts in parallel
-    const artifacts = [
-      { name: "rendered.html", endpoint: `/api/jobs/${jobId}/frames/${i}/html` },
-      { name: "figma-screenshot.png", endpoint: `/api/jobs/${jobId}/frames/${i}/figma-screenshot` },
-      { name: "screenshot.png", endpoint: `/api/jobs/${jobId}/frames/${i}/screenshot` },
-      { name: "diff.png", endpoint: `/api/jobs/${jobId}/frames/${i}/diff` },
-      { name: "manifest.json", endpoint: `/api/jobs/${jobId}/frames/${i}/manifest` },
-      { name: "ai-ready.html", endpoint: `/api/jobs/${jobId}/frames/${i}/ai-ready-html` },
-      // Compare iteration artifacts (available after calling compare)
-      { name: "cleaned-screenshot.png", endpoint: `/api/jobs/${jobId}/frames/${i}/cleaned-screenshot` },
-      { name: "cleaned-diff.png", endpoint: `/api/jobs/${jobId}/frames/${i}/cleaned-diff` },
-    ];
-
-    await Promise.allSettled(
-      artifacts.map(async (art) => {
-        try {
-          const res = await engineFetch(config, art.endpoint);
-          if (res.ok) {
-            const data = Buffer.from(await res.arrayBuffer());
-            await writeFile(join(frameDir, art.name), data);
-          }
-        } catch {
-          // Skip missing artifacts
-        }
-      })
-    );
-
-    // Download issue-diff if available
-    try {
-      const issueRes = await engineFetch(config, `/api/jobs/${jobId}/frames/${i}/artifact/issue-diff.json`);
-      if (issueRes.ok) {
-        const data = Buffer.from(await issueRes.arrayBuffer());
-        await writeFile(join(frameDir, "issue-diff.json"), data);
-      }
-    } catch {
-      // Skip
-    }
-
-    // Download SVG map and image map
-    for (const mapFile of ["svg-map.json", "image-map.json"]) {
-      try {
-        const res = await engineFetch(config, `/api/jobs/${jobId}/frames/${i}/${mapFile.replace(".json", "")}`);
-        if (res.ok) {
-          const data = Buffer.from(await res.arrayBuffer());
-          await writeFile(join(frameDir, mapFile), data);
-        }
-      } catch {
-        // Skip
-      }
-    }
-
-    // Download frame images and rewrite image-map.json with relative paths
-    let imagesDownloaded = 0;
-    let imagesTotal = 0;
-    try {
-      const mapRes = await engineFetch(config, `/api/jobs/${jobId}/frames/${i}/image-map`);
-      if (mapRes.ok) {
-        const imageMap: Record<string, string> = await mapRes.json();
-        imagesTotal = Object.keys(imageMap).length;
-        const imgDir = join(frameDir, "images");
-        await mkdir(imgDir, { recursive: true });
-
-        // Rewrite image-map.json: replace full URLs with relative paths
-        const rewrittenMap: Record<string, string> = {};
-
-        await Promise.allSettled(
-          Object.entries(imageMap).map(async ([ref, value]) => {
-            try {
-              // image-map.json values may be full URLs (http://localhost:8082/api/.../images/hash.png)
-              // or relative paths. Extract just the filename for both API fetch and local storage.
-              const filename = value.split("/").pop() || value;
-              rewrittenMap[ref] = `images/${filename}`;
-              const imgRes = await engineFetch(config, `/api/jobs/${jobId}/frames/${i}/images/${filename}`);
-              if (imgRes.ok) {
-                const data = Buffer.from(await imgRes.arrayBuffer());
-                await writeFile(join(imgDir, filename), data);
-                imagesDownloaded++;
-              }
-            } catch {
-              // Skip missing images
-            }
-          })
-        );
-
-        // Overwrite image-map.json with relative paths so Claude Code sees clean filenames
-        await writeFile(
-          join(frameDir, "image-map.json"),
-          JSON.stringify(rewrittenMap, null, 2),
-        );
-      }
-    } catch {
-      // Skip if no image map
-    }
-
-    frameSummaries.push({
-      index: i,
-      name: frame.name || `Frame ${i}`,
-      width: frame.width,
-      height: frame.height,
-      parity: `${(frame.parityScore ?? 0).toFixed(1)}%`,
-      images: `${imagesDownloaded}/${imagesTotal}`,
-    });
-
-    console.error(`[cfd] synced frame ${i}/${frames.length - 1}: ${frame.name} (images: ${imagesDownloaded}/${imagesTotal})`);
+    const summary = await syncFrameArtifacts(config, jobId, i, frame, join(framesDir, String(i)));
+    frameSummaries.push(summary);
   }
 
   // Generate build guide (page-to-frame mapping, breakpoints, output structure)
   const frameInfos: FrameInfo[] = frames.map((f: any, i: number) => ({
     index: i,
-    name: f.name || `Frame ${i}`,
+    name: (f.name || `Frame ${i}`).trim(),
     page: f.page || "Page 1",
     width: f.width,
     height: f.height,

@@ -1,20 +1,36 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { readFile, readdir, rm } from "node:fs/promises";
+import { readFile, readdir, rm, writeFile, mkdir, stat } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { loadConfig } from "./config.js";
 import { engineFetch } from "./engine.js";
-import { syncJob, getWorkspacePath } from "./sync.js";
+import { syncJob, syncFrame, getWorkspacePath } from "./sync.js";
 import { submitFrame, buildWebsite, uploadWebsite } from "./submit.js";
 import { MCP_INSTRUCTIONS } from "./instructions.js";
+
+// Recursively walk a directory — cross-platform, works on all Node 18+ versions
+async function walkWebsiteDir(dir: string): Promise<string[]> {
+  const files: string[] = [];
+  const entries = await readdir(dir);
+  for (const entry of entries) {
+    const fullPath = join(dir, entry);
+    const s = await stat(fullPath);
+    if (s.isDirectory()) {
+      files.push(...await walkWebsiteDir(fullPath));
+    } else {
+      files.push(fullPath);
+    }
+  }
+  return files;
+}
 
 export async function startMcpServer(): Promise<void> {
   const config = await loadConfig();
 
   const server = new McpServer(
-    { name: "cfd", version: "0.4.2" },
+    { name: "cfd", version: "0.5.0" },
     { instructions: MCP_INSTRUCTIONS },
   );
 
@@ -24,6 +40,21 @@ export async function startMcpServer(): Promise<void> {
     "List all pipeline jobs from CodeFromDesign. Returns job IDs, status, Figma URLs, frame counts, and parity scores.",
     {},
     async () => {
+      // API key check — catch missing config early
+      if (!config.apiKey) {
+        return { content: [{ type: "text", text: `No API key configured. Run \`cfd init <your-api-key>\` to set up, or set the CFD_API_KEY environment variable.` }] };
+      }
+
+      // Health check — catch unreachable engine early with a clear message
+      try {
+        const healthRes = await engineFetch(config, "/health");
+        if (!healthRes.ok) {
+          return { content: [{ type: "text", text: `Engine health check failed (${healthRes.status}). Is the engine running at ${config.engineUrl}?` }] };
+        }
+      } catch (err: any) {
+        return { content: [{ type: "text", text: `Engine not reachable at ${config.engineUrl}. Check that the engine is running and your network connection is active.\n\nError: ${err.message}` }] };
+      }
+
       const res = await engineFetch(config, "/api/jobs");
       if (!res.ok) {
         return { content: [{ type: "text", text: `Error: ${res.status} ${res.statusText}` }] };
@@ -57,10 +88,21 @@ export async function startMcpServer(): Promise<void> {
     async ({ jobId }) => {
       try {
         const result = await syncJob(config, jobId);
+
+        // Collect warnings from all frames
+        const allWarnings: string[] = [];
+        for (const f of result.frames) {
+          if (f.warnings?.length) {
+            allWarnings.push(`\u{1F6A8} Frame ${f.index} (${f.name}): missing critical artifacts: ${f.warnings.join(", ")}`);
+          }
+        }
+
         return {
           content: [{
             type: "text",
             text: [
+              // Surface warnings first — most important
+              ...(allWarnings.length > 0 ? [...allWarnings, ``] : []),
               `Synced job ${jobId} to workspace.`,
               ``,
               `Workspace: ${result.workspacePath}`,
@@ -72,8 +114,8 @@ export async function startMcpServer(): Promise<void> {
               `    build-guide.json            -- page-to-frame mapping, breakpoints, output structure`,
               `    logs/                       -- session and frame logs (see instructions)`,
               `    frames/`,
-              ...result.frames.map((f: any) =>
-                `      ${f.index}/                   -- ${f.name} (${f.width}x${f.height}, parity: ${f.parity}, images: ${f.images ?? "n/a"})`
+              ...result.frames.map((f) =>
+                `      ${f.index}/                   -- ${f.name} (${f.width}x${f.height}, parity: ${f.parity}, images: ${f.images})`
               ),
               ``,
               `Each frame directory contains:`,
@@ -91,6 +133,41 @@ export async function startMcpServer(): Promise<void> {
         };
       } catch (err: any) {
         return { content: [{ type: "text", text: `Sync failed: ${err.message}` }] };
+      }
+    }
+  );
+
+  // --- Tool: sync_frame ---
+  server.tool(
+    "sync_frame",
+    "Re-sync a single frame's artifacts (screenshots, diffs, metadata, images). Much faster than full sync — use after compare to get updated artifacts, or to re-download a specific frame.",
+    {
+      jobId: z.string().describe("The job ID"),
+      frameIndex: z.number().describe("The frame index (0-based)"),
+    },
+    async ({ jobId, frameIndex }) => {
+      try {
+        const result = await syncFrame(config, jobId, frameIndex);
+
+        const warnings: string[] = [];
+        if (result.warnings?.length) {
+          warnings.push(`\u{1F6A8} Missing critical artifacts: ${result.warnings.join(", ")}`);
+        }
+
+        return {
+          content: [{
+            type: "text",
+            text: [
+              ...(warnings.length > 0 ? [...warnings, ``] : []),
+              `Synced frame ${frameIndex}: ${result.name}`,
+              `Dimensions: ${result.width}x${result.height}`,
+              `Parity: ${result.parity}`,
+              `Images: ${result.images}`,
+            ].join("\n"),
+          }],
+        };
+      } catch (err: any) {
+        return { content: [{ type: "text", text: `Sync frame failed: ${err.message}` }] };
       }
     }
   );
@@ -116,7 +193,7 @@ export async function startMcpServer(): Promise<void> {
   // --- Tool: build ---
   server.tool(
     "build",
-    "Trigger website build from cleaned frames. The engine assembles a production website.",
+    "Trigger ENGINE-SIDE website build from cleaned frames (engine does all the work). Rarely needed — prefer submit_website for the standard Claude Code workflow where YOU build the responsive website locally.",
     {
       jobId: z.string().describe("The job ID to build a website from"),
     },
@@ -133,7 +210,7 @@ export async function startMcpServer(): Promise<void> {
   // --- Tool: submit_website ---
   server.tool(
     "submit_website",
-    "Upload a locally-built website directory to the engine. Reads all files (HTML, CSS, JS, images) and creates a build record viewable in the web app.",
+    "Upload YOUR locally-built website directory to the engine. THIS IS THE STANDARD FLOW — you build the responsive website locally (Phase C), then upload it here. Validates images and HTML before uploading.",
     {
       jobId: z.string().describe("The job ID this website was built from"),
       directory: z.string().describe("Absolute path to the directory containing the built website files (HTML, CSS, JS, images)"),
@@ -143,28 +220,121 @@ export async function startMcpServer(): Promise<void> {
         // Validate images directory
         const imagesDir = join(directory, "images");
         if (!existsSync(imagesDir)) {
-          return { content: [{ type: "text", text: `\u{1F6A8} VALIDATION FAILED: No images/ directory found in the website. Copy images from frames/{idx}/images/ to website/images/ (Phase C Step C5). Fix this before submitting.` }] };
+          return { content: [{ type: "text", text: `\u{1F6A8} VALIDATION FAILED: No images/ directory found in the website. Call collect_images first to gather images from all frames into website/images/ (Phase C Step C5). Fix this before submitting.` }] };
         }
         const imageFiles = (await readdir(imagesDir)).filter((f) => !f.startsWith("."));
         if (imageFiles.length === 0) {
-          return { content: [{ type: "text", text: `\u{1F6A8} VALIDATION FAILED: website/images/ directory is EMPTY. Copy images from frames/{idx}/images/ to website/images/ (Phase C Step C5). Fix this before submitting.` }] };
+          return { content: [{ type: "text", text: `\u{1F6A8} VALIDATION FAILED: website/images/ directory is EMPTY. Call collect_images first to gather images from all frames (Phase C Step C5). Fix this before submitting.` }] };
         }
 
-        // Scan HTML files for localhost references
-        const htmlFiles = (await readdir(directory, { recursive: true })) as string[];
-        for (const f of htmlFiles) {
-          if (typeof f === "string" && f.endsWith(".html")) {
-            const content = await readFile(join(directory, f), "utf-8");
+        // Scan ALL HTML files for localhost references (report all violations at once)
+        const localhostViolations: string[] = [];
+        const allFiles = await walkWebsiteDir(directory);
+        for (const fullPath of allFiles) {
+          const relPath = fullPath.slice(directory.length + 1).split("\\").join("/");
+          if (relPath.endsWith(".html")) {
+            const content = await readFile(fullPath, "utf-8");
             if (/https?:\/\/localhost/i.test(content)) {
-              return { content: [{ type: "text", text: `\u{1F6A8} VALIDATION FAILED: ${f} contains localhost URLs. All image/asset references must use relative paths (images/{hash}.png). Fix this before submitting.` }] };
+              localhostViolations.push(relPath);
             }
           }
         }
+        if (localhostViolations.length > 0) {
+          return { content: [{ type: "text", text: `\u{1F6A8} VALIDATION FAILED: ${localhostViolations.length} file(s) contain localhost URLs:\n${localhostViolations.map(f => `  - ${f}`).join("\n")}\n\nAll image/asset references must use relative paths (images/{hash}.png). Fix ALL files before submitting.` }] };
+        }
+
+        // Validate against build-guide.json (warn, don't block)
+        const submitWarnings: string[] = [];
+        const buildGuidePath = join(getWorkspacePath(jobId), "build-guide.json");
+        if (existsSync(buildGuidePath)) {
+          try {
+            const guide = JSON.parse(await readFile(buildGuidePath, "utf-8"));
+            if (guide.pages) {
+              for (const page of guide.pages) {
+                const expectedFile = join(directory, page.outputFile);
+                if (!existsSync(expectedFile)) {
+                  submitWarnings.push(`\u{26A0}\u{FE0F} Missing page: ${page.outputFile} (expected for "${page.name}")`);
+                }
+              }
+            }
+            const cssPath = join(directory, "css", "styles.css");
+            if (!existsSync(cssPath)) {
+              submitWarnings.push(`\u{26A0}\u{FE0F} Missing css/styles.css — shared design system file expected`);
+            }
+          } catch { /* skip validation if build-guide unreadable */ }
+        }
 
         const result = await uploadWebsite(config, jobId, directory);
-        return { content: [{ type: "text", text: result }] };
+
+        const finalText = submitWarnings.length > 0
+          ? [...submitWarnings, ``, result].join("\n")
+          : result;
+
+        return { content: [{ type: "text", text: finalText }] };
       } catch (err: any) {
         return { content: [{ type: "text", text: `Upload failed: ${err.message}` }] };
+      }
+    }
+  );
+
+  // --- Tool: collect_images ---
+  server.tool(
+    "collect_images",
+    "Collect all images from all frames into website/images/ for website assembly. Deduplicates by filename. Call this during Phase C (website assembly) instead of manually copying images.",
+    {
+      jobId: z.string().describe("The job ID"),
+    },
+    async ({ jobId }) => {
+      try {
+        const wsPath = getWorkspacePath(jobId);
+        const framesDir = join(wsPath, "frames");
+
+        if (!existsSync(framesDir)) {
+          return { content: [{ type: "text", text: `No frames directory found at ${framesDir}. Run sync first to download frame data.` }] };
+        }
+
+        const websiteImagesDir = join(wsPath, "website", "images");
+        await mkdir(websiteImagesDir, { recursive: true });
+
+        // Read all frame directories
+        const frameDirs = (await readdir(framesDir)).filter((d) => /^\d+$/.test(d)).sort((a, b) => Number(a) - Number(b));
+
+        let collected = 0;
+        let duplicates = 0;
+        const seen = new Set<string>();
+
+        for (const frameIdx of frameDirs) {
+          const imgDir = join(framesDir, frameIdx, "images");
+          if (!existsSync(imgDir)) continue;
+
+          const files = await readdir(imgDir);
+          for (const file of files) {
+            if (file.startsWith(".")) continue;
+            if (seen.has(file)) {
+              duplicates++;
+              continue;
+            }
+            seen.add(file);
+            const data = await readFile(join(imgDir, file));
+            await writeFile(join(websiteImagesDir, file), data);
+            collected++;
+          }
+        }
+
+        return {
+          content: [{
+            type: "text",
+            text: [
+              `Collected images to ${websiteImagesDir}`,
+              `Files: ${collected} unique, ${duplicates} duplicates skipped`,
+              `Source frames: ${frameDirs.length}`,
+              ``,
+              `Images are ready. Reference them in your HTML as: images/{filename}`,
+            ].join("\n"),
+          }],
+        };
+      } catch (err: any) {
+        return { content: [{ type: "text", text: `Collect images failed: ${err.message}` }] };
       }
     }
   );
@@ -172,7 +342,7 @@ export async function startMcpServer(): Promise<void> {
   // --- Tool: compare ---
   server.tool(
     "compare",
-    "Screenshot cleaned.html and diff against the Figma reference. Returns parity score and category breakdown. Call sync after to download updated diff images. REMINDER: max 2 background agents at a time.",
+    "Screenshot cleaned.html and diff against the Figma reference. Returns parity score, category breakdown, AND diff images inline (no sync needed). REMINDER: max 2 background agents at a time.",
     {
       jobId: z.string().describe("The job ID"),
       frameIndex: z.number().describe("The frame index (0-based)"),
@@ -274,14 +444,51 @@ export async function startMcpServer(): Promise<void> {
         if ((result.parityScore ?? 0) >= 95) {
           lines.push(`Parity is above 95% — frame looks good. You can submit it or keep refining.`);
         } else if ((result.parityScore ?? 0) >= 85) {
-          lines.push(`Parity is decent but can be improved. Check the diff image for remaining issues.`);
-          lines.push(`Run: sync to download the updated cleaned-diff.png and cleaned-screenshot.png`);
+          lines.push(`Parity is decent but can be improved. Check the diff image below for remaining issues.`);
         } else {
-          lines.push(`Parity is below 85% — significant differences remain. Review the diff carefully.`);
-          lines.push(`Run: sync to download the updated cleaned-diff.png and cleaned-screenshot.png`);
+          lines.push(`Parity is below 85% — significant differences remain. Review the diff image below.`);
         }
 
-        return { content: [{ type: "text", text: lines.join("\n") }] };
+        // Build content array with text + inline images
+        const content: Array<{ type: "text"; text: string } | { type: "image"; data: string; mimeType: string }> = [];
+        content.push({ type: "text", text: lines.join("\n") });
+
+        // Fetch diff and screenshot images inline — eliminates need for separate sync call
+        const inlineImages: Array<{ label: string; name: string; endpoint: string }> = [
+          { label: "DIFF IMAGE (color-coded: red=layout, blue=font, green=image, yellow=vector, purple=shadow):",
+            name: "cleaned-diff.png",
+            endpoint: `/api/jobs/${jobId}/frames/${frameIndex}/cleaned-diff` },
+          { label: "YOUR RENDERED OUTPUT (what your cleaned.html looks like):",
+            name: "cleaned-screenshot.png",
+            endpoint: `/api/jobs/${jobId}/frames/${frameIndex}/cleaned-screenshot` },
+        ];
+
+        for (const img of inlineImages) {
+          try {
+            const imgRes = await engineFetch(config, img.endpoint);
+            if (imgRes.ok) {
+              const imgData = Buffer.from(await imgRes.arrayBuffer());
+              await writeFile(join(wsPath, "frames", String(frameIndex), img.name), imgData);
+              content.push({ type: "text", text: img.label });
+              content.push({
+                type: "image",
+                data: imgData.toString("base64"),
+                mimeType: "image/png",
+              });
+            }
+          } catch { /* non-critical */ }
+        }
+
+        // Update local compare-log.json from engine
+        try {
+          const logRes = await engineFetch(config, `/api/jobs/${jobId}/frames/${frameIndex}/artifact/compare-log.json`);
+          if (logRes.ok) {
+            const logData = Buffer.from(await logRes.arrayBuffer());
+            await writeFile(join(wsPath, "frames", String(frameIndex), "compare-log.json"), logData);
+          }
+        } catch { /* non-critical */ }
+
+        return { content };
       } catch (err: any) {
         return { content: [{ type: "text", text: `Compare failed: ${err.message}` }] };
       }

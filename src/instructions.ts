@@ -23,7 +23,7 @@ IMAGE PATHS: NEVER use localhost URLs, API URLs, or any http:// path in image re
 
 NO HALLUCINATED UI: The build-guide.json "navigation" array is metadata for FILE LINKING ONLY — it is NOT a list of nav links to render as a visible element. The Figma screenshot is the SOLE authority on what navigation looks like. If you cannot point to an element in figma-screenshot.png, it does not exist in your output.
 
-WORKFLOW ORDER: list → sync → analyze → clean → compare → iterate → build. NEVER call get_snips proactively. Only call get_snips when the user pastes snip metadata into the conversation.`;
+WORKFLOW ORDER: list → sync → analyze → clean → compare → iterate → assemble website → submit_website. NEVER call get_snips proactively. Only call get_snips when the user pastes snip metadata into the conversation.`;
 
 // ---------------------------------------------------------------------------
 // Section: Preamble
@@ -133,14 +133,16 @@ This is an **ABSOLUTE RULE** — a violation is a FAILURE, same as skipping cont
    - Follows the full iterative compare loop for that page
    - Must achieve parity > 95% before submitting
    - **MUST log all work** to the frame log (see Session Logging)
-3. **Phase 3 (Main agent):** Review all completed pages, ensure consistent navigation, call build or submit_website
+3. **Phase 3 (Main agent):** Review all completed pages, ensure consistent navigation, call submit_website
 
 ### Agent prompt template
 When delegating a page to a background agent, provide:
-- The job ID and frame index
+- The job ID and frame index (or indices if the page has multiple breakpoints)
+- The workspace path (from workspace_path tool)
 - The site-wide design system (colors, fonts, spacing)
 - The navigation structure (all page names and routes)
-- Shared component patterns (header, footer)
+- Shared component patterns (header, footer — only if present in Figma)
+- Key context: "compare returns diff + screenshot images inline — no sync needed after. Use submit_cleaned_frame after achieving 95%+ parity. Log all iterations to logs/frames/frame-{idx}-log.md."
 - Clear instruction: "Build this page to production quality with 95%+ parity"
 
 ### CRITICAL: Permission failure handling
@@ -243,6 +245,7 @@ const WORKSPACE_STRUCTURE = `## Workspace Structure
       cleaned.html                  — YOUR OUTPUT — write your refined code here
       cleaned-screenshot.png        — screenshot of your output (after calling compare)
       cleaned-diff.png              — diff between your output and the Figma reference
+      compare-log.json              — iteration history (parity per iteration, for regression detection)
     1/
       ...
 \`\`\``;
@@ -277,12 +280,12 @@ This is NOT a single-pass process. The methodology is iterative:
 For each frame:
   1. Study the inputs (Figma screenshot, HTML, manifest, diff)
   2. Write cleaned.html (clean up the raw HTML into semantic, responsive structure)
-  3. Call compare → engine screenshots your HTML and diffs against Figma
-  4. Sync → download cleaned-diff.png and cleaned-screenshot.png
-  5. Read the diff image — the colors tell you what type of issue it is
-  6. Adjust cleaned.html to fix the differences
-  7. Call compare again → get updated parity score
-  8. Repeat steps 4-7 until parity is above 95%
+  3. Call compare → returns parity score + diff image + screenshot INLINE (no sync needed)
+  4. Read the diff image in the compare response — the colors tell you what type of issue it is
+  5. Adjust cleaned.html to fix the differences
+  6. Call compare again → get updated parity score + new diff image
+  7. Repeat steps 4-6 until parity is above 95%
+  8. Call submit_cleaned_frame to upload the final cleaned HTML to the engine
   9. Log all iterations to the frame log
   10. Move to the next frame
 \`\`\`
@@ -398,9 +401,8 @@ For each page in build-guide.json:
 - Use relative paths: \`index.html\`, \`pages/{slug}.html\`
 
 ### Step C5: Collect Images
-- Copy all images from all \`frames/{idx}/images/\` directories
-- Deduplicate by filename (hash-named = identical content)
-- Place in \`website/images/\`
+- Call \`collect_images\` — it automatically gathers images from ALL frames into \`website/images/\`, deduplicating by filename
+- This is faster and more reliable than manually copying files
 
 ### Step C6: Validate Before Submitting
 - Every page in build-guide.json has a corresponding HTML file
@@ -419,7 +421,7 @@ const PHASE_D_SUBMIT = `## Phase D: Review and Submit
 1. Read \`build-log.md\` — verify all pages are accounted for
 2. Spot-check 2-3 pages against their Figma screenshots
 3. Confirm navigation works between pages (links point to real files)
-4. Call \`submit_website\` with the \`website/\` directory path
+4. Call \`submit_website\` with the \`website/\` directory path — this is THE standard flow. Do NOT call \`build\` — that delegates to the engine and skips your responsive work.
 5. Update \`session-log.md\` with final state
 6. Report the result to the user`;
 
@@ -624,12 +626,14 @@ const TOOLS_REFERENCE = `## MCP Tools Reference
 
 | Tool | What it does |
 |------|-------------|
-| \`list\` | List all projects with status, frame counts, parity scores |
-| \`sync\` | Download all frame data (HTML, screenshots, diffs, images, SVGs) to workspace |
-| \`compare\` | Send cleaned.html to engine → get screenshot + diff + parity score |
+| \`list\` | List all projects with status, frame counts, parity scores. Checks engine health first. |
+| \`sync\` | Download ALL frame data (HTML, screenshots, diffs, images, SVGs) to workspace. Warns if critical artifacts fail. |
+| \`sync_frame\` | Re-sync a SINGLE frame's artifacts. Much faster than full sync — use when you need updated data for one frame. |
+| \`compare\` | Send cleaned.html to engine → returns parity score + diff image + screenshot INLINE. No sync needed after. |
 | \`submit_cleaned_frame\` | Upload final cleaned HTML for a frame |
-| \`build\` | Trigger the ENGINE to assemble a website from cleaned frames (engine does the work) |
-| \`submit_website\` | Upload YOUR locally-built website directory to the engine (YOU do the work — this is the standard flow) |
+| \`collect_images\` | Collect all images from all frames into website/images/ (deduplicates). Use in Phase C Step C5. |
+| \`submit_website\` | Upload YOUR locally-built website directory to the engine. **THIS IS THE STANDARD FLOW.** Validates against build-guide.json. |
+| \`build\` | Trigger the ENGINE to assemble a website (engine does the work). Rarely needed — prefer submit_website. |
 | \`get_snips\` | List user-reported visual issues (snips) with cropped screenshots |
 | \`clear_snips\` | Remove all snips for a job after issues are resolved |
 | \`workspace_path\` | Get the local path to a job's workspace |
@@ -637,26 +641,26 @@ const TOOLS_REFERENCE = `## MCP Tools Reference
 ### Typical session
 
 \`\`\`
-list                              → see available projects
+list                              → see available projects (checks engine health)
 sync {jobId}                      → download everything + build-guide.json + logs/
   read build-guide.json           → understand page-to-frame mapping
   read figma-screenshot.png, ai-ready.html, manifest.json, svg-map.json
   STUDY the screenshot — count every section, identify every element
   clean up the raw HTML into semantic, responsive structure → write cleaned.html
   LOG to frame log
-compare {jobId} {frameIndex}      → get parity score + category breakdown
-sync {jobId}                      → download updated diff images
-  read cleaned-diff.png — colors tell you what to fix
+compare {jobId} {frameIndex}      → returns parity score + diff image + screenshot INLINE
+  read the diff image from the compare response — colors tell you what to fix
   adjust cleaned.html to fix ALL differences
   LOG iteration to frame log
-compare {jobId} {frameIndex}      → check improvement
+compare {jobId} {frameIndex}      → check improvement (still returns diff inline)
   repeat until parity > 95%
 submit_cleaned_frame              → upload final version
   ... repeat for all frames ...
   BUILD WEBSITE (Phase C):
   read build-guide.json → merge frames into responsive pages
   create website/ directory with mandatory structure
-  submit_website {jobId}          → upload to engine
+  collect_images {jobId}          → gather all frame images into website/images/
+  submit_website {jobId}          → upload to engine (validates against build-guide.json)
   LOG to build-log.md and session-log.md
 \`\`\`
 
