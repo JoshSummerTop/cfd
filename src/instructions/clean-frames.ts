@@ -1,8 +1,8 @@
 /**
  * Job 1: Clean Frames — Transform raw Figma HTML into production-grade code.
  *
- * This is the focused instruction set for frame cleaning.
- * Delivered contextually by the sync tool when uncleaned frames exist.
+ * Core principle: TRANSFORM, don't rewrite. ai-ready.html already has the
+ * correct content. Restructure it surgically — don't start from a blank page.
  */
 
 import { WORKSPACE_STRUCTURE, DIFF_SYSTEM, IMAGES_AND_SVGS, OUTPUT_FORMAT, SNIPS } from "./shared.js";
@@ -11,126 +11,125 @@ const CLEAN_FRAMES_CORE = `# Job 1: Clean Frames
 
 ## What You Are Doing
 
-Each frame has raw HTML from Figma's coordinate system — position:absolute everywhere, fixed pixel dimensions, inline styles. Your job is to transform this into production-grade code that visually matches the Figma design.
+Each frame has HTML from the engine with the correct content — every heading, paragraph, button, image, color, and font is already there. But the layout uses Figma's coordinate system (position:absolute, fixed px dimensions, inline styles). Your job is to **transform the layout** into production-grade CSS while keeping all the content intact.
 
-This is craft work. Each frame needs careful attention. The result is persistent — once a frame is cleaned and submitted, it's done.
+**TRANSFORM, don't rewrite.** The content is correct. The layout needs restructuring. This is a surgical edit — not starting from a blank page.
 
 ## Your Inputs
 
-### ai-ready.html — YOUR PRIMARY SOURCE
-This is a lighter version of the engine's raw HTML. Same DOM structure, but:
-- SVGs replaced with \`<div data-svg-id="...">\` placeholders (~40% fewer tokens)
-- Images use \`data-image-ref="img-0"\` with grey backgrounds
-- No localhost URLs to fix — resolve refs via \`image-map.json\` and \`svg-map.json\`
+### ai-ready.html — YOUR STARTING TEMPLATE
+Same DOM structure as the engine output but lighter (~40% fewer tokens):
+- SVGs replaced with \`<div data-svg-id="...">\` placeholders
+- Images use \`data-image-ref="img-0"\` refs
+- No localhost URLs
 
-It has ALL the real text, colors, fonts, spacing, and structure from the Figma design. Read content from here.
+**This is your starting template.** It has ALL the correct text, colors, fonts, spacing, and structure. You are transforming THIS file — not writing new HTML from scratch.
 
-**Do NOT use \`rendered.html\`.** It has inline SVGs and localhost URLs — bigger, messier, same content.
+**Do NOT use \`rendered.html\`.** Same content but bloated with inline SVGs and localhost URLs.
 
 ### manifest.json — STRUCTURE AND LAYOUT DATA
-Contains data that eliminates guesswork:
+Eliminates guesswork:
 - **\`sections[]\`** — each section's \`role\` (header, hero, content, footer) and suggested HTML \`tag\`
 - **\`autoLayout[]\`** — exact flex properties (\`direction\`, \`gap\`, \`justify\`, \`align\`, \`padding\`) keyed by \`data-node-id\`
 - **\`components[]\`** — detected repeating patterns with instance counts
 
-Use \`sections\` to scaffold your semantic HTML structure. Use \`autoLayout\` to apply correct flex properties instead of guessing. Use \`components\` to identify card grids, repeated items, etc.
-
 ### issue-diff.json — WHAT'S FIXABLE VS UNFIXABLE
-Per-node parity breakdowns showing exactly what's causing diff pixels. Each entry has:
-- \`nodeName\`, \`failureType\` (wrong_position, wrong_fill_color, overflow_clip, etc.)
-- \`diffPixels\` — how many pixels this node contributes to the diff
-
-**Read this after each compare** to prioritize fixes. Some diffs are UNFIXABLE:
-- CSS \`blur()\` filter renders differently between engine and browser (often 90%+ of hero banner diffs)
-- Font anti-aliasing differences between OSes
-- Sub-pixel rendering
-
-If \`issue-diff.json\` shows remaining diffs are all unfixable, stop iterating even below 90%.
+Per-node parity breakdowns. Read after each compare to:
+- Focus on fixable issues (wrong_position, wrong_width, overflow_clip)
+- Skip unfixable diffs (CSS blur rendering, font anti-aliasing, sub-pixel rendering)
+- If remaining diffs are all unfixable, stop iterating even below 90%
 
 ### figma-screenshot.png — VISUAL TRUTH
 What the design should look like. When in doubt, match this.
 
-### Authority Hierarchy
-**figma-screenshot.png > manifest.json > ai-ready.html**
+### Authority: figma-screenshot.png > manifest.json > ai-ready.html
 
-## The Developer Workflow
+## The Transformation Workflow
 
-Work like a developer looking at a design mockup:
+**You are transforming ai-ready.html, not writing from scratch.**
 
-1. **STUDY** the Figma screenshot (\`figma-screenshot.png\`) — count every section top-to-bottom.
-2. **READ** \`manifest.json\` — use \`sections[]\` for semantic structure, \`autoLayout[]\` for flex properties.
-3. **READ** \`ai-ready.html\` — extract all content (text, colors, fonts, image refs). Resolve images via \`image-map.json\`, SVGs via \`svg-map.json\`.
-4. **WRITE** \`cleaned.html\` with:
-   - Semantic HTML: \`<header>\`, \`<main>\`, \`<section>\`, \`<footer>\` (use manifest section roles)
-   - Flexbox/grid for page-level layout (section stacking, columns, grids)
-   - \`position:absolute\` within \`position:relative\` containers for overlays (badges, captions, hover states on images) — this is standard production CSS
-   - CSS custom properties in \`:root\`
-   - BEM class names (\`.hero__title\`, \`.card__image\`, \`.btn--primary\`)
-   - ALL content from the design — every element visible in the Figma screenshot
-   - Match the frame's exact dimensions — responsiveness comes later in Job 2
-5. **VALIDATE** — call \`validate\` to instantly check structural quality (no server round-trip). Fix any errors before proceeding.
-6. **COMPARE** — call \`compare\` to get a parity score and diff image
-7. **READ** the diff image + \`issue-diff.json\` — identify fixable vs unfixable issues
-8. **FIX** fixable issues in cleaned.html
-9. **COMPARE** again — parity should improve
-10. **REPEAT** until parity > 90% or remaining diffs are all unfixable (max 5 iterations)
-11. **SUBMIT** — call \`submit_cleaned_frame\` (blocks if quality checks fail)
+1. **STUDY** the Figma screenshot — count every section top-to-bottom.
+2. **READ** \`manifest.json\` — note section roles, flex properties from \`autoLayout\`.
+3. **TRANSFORM** \`ai-ready.html\` into \`cleaned.html\`:
+
+   **What to change (layout):**
+   - Replace \`position:absolute\` page layout with flexbox/grid (use \`autoLayout\` values from manifest)
+   - Move inline \`style=""\` attributes to a \`<style>\` block with BEM classes
+   - Wrap content in semantic elements (\`<header>\`, \`<main>\`, \`<section>\`, \`<footer>\`) based on manifest \`sections[]\` roles
+   - Replace \`width:1440px\` on containers with \`max-width\`
+   - Add \`:root\` CSS custom properties for colors, fonts, spacing
+   - Resolve \`data-image-ref\` → \`images/{hash}.png\` via \`image-map.json\`
+   - Resolve \`data-svg-id\` → inline SVG via \`svg-map.json\`
+
+   **What to KEEP (content — do not rewrite):**
+   - All text content verbatim — headings, paragraphs, labels, links
+   - All colors, font sizes, font weights, font families
+   - All spacing values (margins, paddings, gaps)
+   - All images and their dimensions
+   - All SVG icons
+   - Element order and hierarchy
+
+   **position:absolute is fine for overlays:**
+   - Badges on product card images (discount/new labels)
+   - Content cards overlaid on hero banners
+   - Hover overlays, floating buttons, image captions
+   - Use \`position:absolute\` within a \`position:relative\` container — this is standard production CSS
+
+4. **VALIDATE** — call \`validate\` to instantly check structural quality. Fix errors before proceeding.
+5. **COMPARE** — call \`compare\` for parity score + diff image.
+6. **READ** diff image + \`issue-diff.json\` — identify fixable vs unfixable issues.
+7. **FIX** fixable issues only.
+8. **REPEAT** steps 5-7 until parity > 90% or remaining diffs are all unfixable (max 5 iterations).
+9. **SUBMIT** — call \`submit_cleaned_frame\`.
 
 ## Cleaning Is Mandatory for ALL Frames
 
-Even a 99% parity frame has garbage HTML — absolute positioning, localhost URLs, no semantic structure. **Every frame gets cleaned regardless of its initial parity score.** Parity is the iteration stop signal, not the quality bar. The quality bar is production-grade semantic commented HTML.
+Even a 99% parity frame has junk layout — absolute positioning, inline styles, no semantic structure. **Every frame gets cleaned.** Parity is the iteration stop signal, not the quality bar. The quality bar is production-grade semantic HTML with proper CSS.
 
-## Expected Parity Progression
+## Expected Parity
 
-- **Iteration 1:** 65-85% — normal. You restructured absolute positioning into flexbox/grid.
-- **Iteration 2:** 80-90% — layout fixes, spacing, image sizing.
-- **Iteration 3-5:** 88-95% — fine-tuning. Some frames will plateau below 90% due to unfixable rendering diffs.
+- **Iteration 1:** 75-90% — normal. Layout restructuring changes pixel output.
+- **Iteration 2-3:** 85-95% — spacing and sizing fixes.
+- Some frames plateau below 90% due to unfixable engine rendering diffs (blur, fonts). That is OK.
 
-If iteration 1 returns >95%, you likely copied raw HTML without cleaning. The submit gate will block this.
+If iteration 1 returns >95%, you likely copied raw HTML without transforming. The submit gate will block this.
 
-If parity DROPS on iteration 2+, stop — your changes made things worse. Review what you changed.
-
-After 5 iterations without reaching 90%, check \`issue-diff.json\`. If remaining diffs are unfixable, submit. If fixable diffs remain, ask the user for guidance.
+If parity DROPS on iteration 2+, your changes made things worse. Revert and try a targeted fix.
 
 ## What Gets Blocked at Submission
 
-The \`submit_cleaned_frame\` tool (and \`validate\`) runs structural quality checks. Submission is REFUSED if:
-- Raw Figma positioning detected (many elements with \`position:absolute\` + large px coordinates like top:200px;left:500px)
-- No semantic elements (\`<header>\`, \`<main>\`, \`<section>\`, etc.)
-- No \`display: flex\` or \`display: grid\` in CSS
-- Fixed Figma viewport width (1440px or 1920px on body/wrapper)
-- More than 30 elements with inline \`style=""\` attributes
-- Localhost or engine API URLs in image references
-
-**There are no shortcuts past this gate.** Write production code.
+\`submit_cleaned_frame\` and \`validate\` check structural quality. Submission is REFUSED if:
+- Raw Figma positioning (many elements with position:absolute + large px coordinates like top:200px;left:500px)
+- No semantic elements (header, main, section, footer)
+- No display:flex or display:grid in CSS
+- Fixed viewport width (1440px or 1920px on body/wrapper)
+- More than 30 inline style="" attributes
+- Localhost or engine API URLs
 
 ## Do Not
 
-- Copy raw HTML with URL find-replace — the gate blocks this
-- Add UI elements not visible in the Figma screenshot
-- Skip sections visible in the screenshot — missing content is a failure
-- Iterate more than 5 times per frame without asking the user
-- Use \`position:absolute\` for page-level layout (flexbox/grid instead). It IS correct for overlays within relative containers.
-- Use inline \`style=""\` on structural elements
-- Add responsive \`@media\` queries — that is Job 2 (website build), not frame cleaning
-
-## Session Logging
-
-Log all work to the workspace:
-- \`logs/session-log.md\` — session start/end state (append-only)
-- \`logs/frames/frame-{idx}-log.md\` — per-frame iteration log (parity before/after, changes made)
+- Rewrite HTML from scratch — transform ai-ready.html
+- Rewrite content that's already correct — only restructure layout
+- Skip sections visible in the screenshot
+- Add UI elements not in the Figma screenshot
+- Use position:absolute for page-level layout (fine for overlays in relative containers)
+- Add responsive @media queries — that is Job 2
+- Iterate more than 5 times without checking issue-diff.json for unfixable diffs
 
 ## Background Agents
 
 For multi-frame jobs, delegate per-frame work to background agents:
-- **HARD LIMIT: 2 agents max at the same time** — launching 3+ is a failure
+- **HARD LIMIT: 2 agents max at the same time**
 - Each agent handles ONE frame
-- Each agent follows the full compare loop
-- Each agent must log to the frame log
 - Queue remaining frames and process in order
 
-### Shared Component Reuse
-Most frames share identical sections (header, footer, hero pattern). After cleaning the first frame, note the shared structure. Provide this to subsequent agents so they reuse it — don't redesign header/footer from scratch 9 times.`;
+### Shared Component Reuse — CRITICAL FOR SPEED
+Most frames share identical sections (header, footer, hero banner, features bar). **Clean the first frame fully, then reuse its shared sections for all subsequent frames.** Provide the cleaned header/footer/hero HTML to each agent. Do NOT redesign these from scratch for every frame — that is 60-70% wasted work.
+
+When delegating to an agent, include:
+- The shared component HTML (header, footer, etc. from the first cleaned frame)
+- The job-specific design tokens (:root variables)
+- "Use these shared sections. Only write the unique <main> content for this frame."`;
 
 export const CLEAN_FRAMES_INSTRUCTIONS = [
   CLEAN_FRAMES_CORE,
