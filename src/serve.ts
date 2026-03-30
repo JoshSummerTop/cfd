@@ -6,10 +6,10 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { loadConfig } from "./config.js";
 import { engineFetch } from "./engine.js";
-import { syncJob, syncFrame, getWorkspacePath } from "./sync.js";
+import { syncJob, syncFrame, getWorkspacePath, getFrameCleanStatus } from "./sync.js";
 import { submitFrame, buildWebsite, uploadWebsite } from "./submit.js";
-import { MCP_INSTRUCTIONS } from "./instructions.js";
-import { validateCleanedHtml, containsLoopbackUrls } from "./validate.js";
+import { HANDSHAKE_INSTRUCTIONS, CLEAN_FRAMES_INSTRUCTIONS, BUILD_WEBSITE_INSTRUCTIONS } from "./instructions/index.js";
+import { validateForSubmission, containsLoopbackUrls } from "./validate.js";
 
 // Recursively walk a directory — cross-platform, works on all Node 18+ versions
 async function walkWebsiteDir(dir: string): Promise<string[]> {
@@ -31,8 +31,8 @@ export async function startMcpServer(): Promise<void> {
   const config = await loadConfig();
 
   const server = new McpServer(
-    { name: "cfd", version: "0.5.0" },
-    { instructions: MCP_INSTRUCTIONS },
+    { name: "cfd", version: "0.6.0" },
+    { instructions: HANDSHAKE_INSTRUCTIONS },
   );
 
   // --- Tool: list ---
@@ -129,6 +129,27 @@ export async function startMcpServer(): Promise<void> {
               ``,
               `Read build-guide.json for the website assembly plan (page-to-frame mapping, breakpoints, output structure).`,
               `Read job.json for an overview of all frames and parity scores.`,
+              ``,
+              // Contextual instructions based on frame clean status
+              ...await (async () => {
+                const cleanStatus = await getFrameCleanStatus(jobId);
+                if (cleanStatus.total === 0) return [];
+                if (cleanStatus.uncleaned.length === 0) {
+                  return [
+                    `---`,
+                    ``,
+                    `All ${cleanStatus.total} frames are cleaned and submitted. Ready for Job 2 (website build).`,
+                    `Call check_readiness to get the website build instructions.`,
+                  ];
+                }
+                return [
+                  `---`,
+                  ``,
+                  `${cleanStatus.cleaned}/${cleanStatus.total} frames cleaned. ${cleanStatus.uncleaned.length} remaining: [${cleanStatus.uncleaned.join(", ")}]`,
+                  ``,
+                  CLEAN_FRAMES_INSTRUCTIONS,
+                ];
+              })(),
             ].join("\n"),
           }],
         };
@@ -176,34 +197,66 @@ export async function startMcpServer(): Promise<void> {
   // --- Tool: submit_cleaned_frame ---
   server.tool(
     "submit_cleaned_frame",
-    "Submit cleaned HTML for a frame. Reads cleaned.html and uploads to engine. WARNING: cleaned.html must NOT contain localhost URLs or http:// image paths — only relative paths like images/{hash}.png.",
+    "Submit production-quality cleaned HTML for a frame. BLOCKS submission if HTML fails structural quality checks (no semantic elements, mass absolute positioning, inline styles, missing flexbox/grid). Write proper production code before calling this.",
     {
       jobId: z.string().describe("The job ID"),
       frameIndex: z.number().describe("The frame index (0-based)"),
     },
     async ({ jobId, frameIndex }) => {
       try {
-        // Validate cleaned.html before submitting (warn, don't block)
         const wsPath = getWorkspacePath(jobId);
         const cleanedPath = join(wsPath, "frames", String(frameIndex), "cleaned.html");
-        const lines: string[] = [];
 
-        if (existsSync(cleanedPath)) {
-          const html = await readFile(cleanedPath, "utf-8");
-          const validation = validateCleanedHtml(html);
-          if (validation.warnings.length > 0) {
-            lines.push(...validation.warnings);
-            lines.push(``);
+        if (!existsSync(cleanedPath)) {
+          return { content: [{ type: "text", text: `No cleaned.html found at ${cleanedPath}. Write cleaned HTML to this path before submitting.` }] };
+        }
+
+        const html = await readFile(cleanedPath, "utf-8");
+
+        // --- Structural quality gate — BLOCKS on failure ---
+        const submission = validateForSubmission(html);
+        if (!submission.pass) {
+          const lines = [
+            `SUBMISSION BLOCKED — cleaned.html failed structural quality checks:\n`,
+            ...submission.errors.map(e => `  FAIL: ${e}`),
+            ``,
+            `Fix these issues in cleaned.html and try again.`,
+            `The quality gate ensures production-grade code — no shortcuts.`,
+          ];
+          if (submission.warnings.length > 0) {
+            lines.push(``, `Warnings (non-blocking):`, ...submission.warnings.map(w => `  WARN: ${w}`));
           }
-          if (validation.isRawHtml) {
-            lines.push(`\u{26A0}\u{FE0F} Submitting anyway, but this HTML will NOT produce a functional website.`);
-            lines.push(`Run compare first, then rewrite with semantic HTML before submitting.`);
-            lines.push(``);
+          return { content: [{ type: "text", text: lines.join("\n") }] };
+        }
+
+        // Passed gate — submit to engine
+        const result = await submitFrame(config, jobId, frameIndex);
+
+        // Write .submitted marker for build gate
+        const markerPath = join(wsPath, "frames", String(frameIndex), ".submitted");
+        await writeFile(markerPath, "", "utf-8");
+
+        // Report status
+        const lines: string[] = [];
+        if (submission.warnings.length > 0) {
+          lines.push(`Warnings (non-blocking):`, ...submission.warnings.map(w => `  ${w}`), ``);
+        }
+        lines.push(result);
+
+        // Count cleaned vs total frames
+        const framesDir = join(wsPath, "frames");
+        if (existsSync(framesDir)) {
+          const frameDirs = (await readdir(framesDir)).filter(d => /^\d+$/.test(d));
+          const total = frameDirs.length;
+          const submitted = frameDirs.filter(d => existsSync(join(framesDir, d, ".submitted"))).length;
+          const remaining = total - submitted;
+          if (remaining === 0) {
+            lines.push(`\nAll ${total} frames cleaned and submitted. Ready for website build — call check_readiness to proceed.`);
+          } else {
+            lines.push(`\n${submitted}/${total} frames submitted. ${remaining} remaining.`);
           }
         }
 
-        const result = await submitFrame(config, jobId, frameIndex);
-        lines.push(result);
         return { content: [{ type: "text", text: lines.join("\n") }] };
       } catch (err: any) {
         return { content: [{ type: "text", text: `Submit failed: ${err.message}` }] };
@@ -228,16 +281,49 @@ export async function startMcpServer(): Promise<void> {
     }
   );
 
+  // --- Tool: check_readiness ---
+  server.tool(
+    "check_readiness",
+    "Check if all frames are cleaned and ready for website assembly. Returns Job 2 (build website) instructions if ready, or lists which frames still need cleaning.",
+    {
+      jobId: z.string().describe("The job ID"),
+    },
+    async ({ jobId }) => {
+      try {
+        const cleanStatus = await getFrameCleanStatus(jobId);
+
+        if (cleanStatus.total === 0) {
+          return { content: [{ type: "text", text: `No frames found for job ${jobId}. Run sync first.` }] };
+        }
+
+        if (cleanStatus.uncleaned.length > 0) {
+          return { content: [{ type: "text", text: `NOT READY for website build.\n\nCleaned: ${cleanStatus.cleaned}/${cleanStatus.total}\nUncleaned frames: [${cleanStatus.uncleaned.join(", ")}]\n\nComplete Job 1 — clean and submit each uncleaned frame before proceeding.` }] };
+        }
+
+        // All frames clean — return Job 2 instructions
+        return { content: [{ type: "text", text: `All ${cleanStatus.total} frames cleaned and submitted. Ready for website build.\n\n${BUILD_WEBSITE_INSTRUCTIONS}` }] };
+      } catch (err: any) {
+        return { content: [{ type: "text", text: `Check failed: ${err.message}` }] };
+      }
+    }
+  );
+
   // --- Tool: submit_website ---
   server.tool(
     "submit_website",
-    "Upload YOUR locally-built website directory to the engine. THIS IS THE STANDARD FLOW — you build the responsive website locally (Phase C), then upload it here. Validates images and HTML before uploading.",
+    "Upload website directory to engine. BLOCKS if any frames have not been cleaned and submitted first. Validates images, HTML quality, and localhost URLs before uploading.",
     {
       jobId: z.string().describe("The job ID this website was built from"),
       directory: z.string().describe("Absolute path to the directory containing the built website files (HTML, CSS, JS, images)"),
     },
     async ({ jobId, directory }) => {
       try {
+        // --- Build gate: all frames must be cleaned ---
+        const cleanStatus = await getFrameCleanStatus(jobId);
+        if (cleanStatus.total > 0 && cleanStatus.uncleaned.length > 0) {
+          return { content: [{ type: "text", text: `SUBMISSION BLOCKED — not all frames have been cleaned and submitted.\n\nUncleaned frames: [${cleanStatus.uncleaned.join(", ")}]\nCleaned: ${cleanStatus.cleaned}/${cleanStatus.total}\n\nComplete Job 1 (clean frames) before building a website. Use submit_cleaned_frame for each frame.` }] };
+        }
+
         // Validate images directory
         const imagesDir = join(directory, "images");
         if (!existsSync(imagesDir)) {
@@ -303,12 +389,18 @@ export async function startMcpServer(): Promise<void> {
   // --- Tool: collect_images ---
   server.tool(
     "collect_images",
-    "Collect all images from all frames into website/images/ for website assembly. Deduplicates by filename. Call this during Phase C (website assembly) instead of manually copying images.",
+    "Collect all images from all frames into website/images/ for website assembly. Deduplicates by filename. Requires all frames to be cleaned and submitted first.",
     {
       jobId: z.string().describe("The job ID"),
     },
     async ({ jobId }) => {
       try {
+        // --- Build gate: all frames must be cleaned ---
+        const cleanStatus = await getFrameCleanStatus(jobId);
+        if (cleanStatus.total > 0 && cleanStatus.uncleaned.length > 0) {
+          return { content: [{ type: "text", text: `BLOCKED — not all frames have been cleaned and submitted.\n\nUncleaned frames: [${cleanStatus.uncleaned.join(", ")}]\nCleaned: ${cleanStatus.cleaned}/${cleanStatus.total}\n\nComplete Job 1 (clean frames) before collecting images for website build.` }] };
+        }
+
         const wsPath = getWorkspacePath(jobId);
         const framesDir = join(wsPath, "frames");
 
@@ -416,10 +508,6 @@ export async function startMcpServer(): Promise<void> {
 
         const html = await readFile(cleanedPath, "utf-8");
 
-        // MCP-level validation (localhost, engine URLs, raw HTML detection)
-        const sharedValidation = validateCleanedHtml(html);
-        const mcpWarnings = sharedValidation.warnings;
-
         // Send to engine for screenshot + diff
         const res = await engineFetch(config, `/api/jobs/${jobId}/frames/${frameIndex}/compare`, {
           method: "POST",
@@ -434,71 +522,25 @@ export async function startMcpServer(): Promise<void> {
 
         const result = await res.json();
 
+        // Just data — no warnings, no coaching. The submit gate handles enforcement.
         const lines: string[] = [];
         const iterationCount = result.iterationCount ?? 1;
 
-        // ── RAW HTML DETECTION ──────────────────────────────────────────
-        // Check if engine flagged excessive absolute positioning (raw Figma HTML).
-        // This is the #1 failure mode: Claude submits raw HTML unchanged, gets 99%
-        // parity, and stops — producing a non-functional website.
-        // Combine engine-side and local raw HTML detection
-        let rawHtmlDetected = sharedValidation.isRawHtml;
-        const absWarning = result.warnings?.find((w: any) => w.code === "absolute_position");
-        if (absWarning) {
-          const countMatch = absWarning.message?.match(/(\d+)\s+elements/);
-          const absCount = countMatch ? parseInt(countMatch[1], 10) : 0;
-          if (absCount > 50) rawHtmlDetected = true;
+        lines.push(`Frame ${frameIndex} — iteration ${iterationCount}`);
+        lines.push(``);
+        lines.push(`Parity: ${result.parityScore?.toFixed(1) ?? "n/a"}%`);
+        if (result.nonFontParity != null) {
+          lines.push(`Non-font: ${result.nonFontParity.toFixed(1)}%`);
         }
-        if (rawHtmlDetected) {
-          // Remove any raw-HTML warning from mcpWarnings (avoid duplication) and show detailed guidance
-          const filteredWarnings = mcpWarnings.filter((w) => !w.includes("RAW HTML DETECTED"));
-          mcpWarnings.length = 0;
-          mcpWarnings.push(...filteredWarnings);
-
-          const absCount = absWarning ? (absWarning.message?.match(/(\d+)\s+elements/)?.[1] ?? "many") : "many";
-          lines.push(`\u{1F6D1} RAW HTML DETECTED: Your HTML has ${absCount} absolute-positioned elements.`);
-          lines.push(`This is raw Figma output, NOT cleaned HTML. You MUST convert to semantic HTML`);
-          lines.push(`with flexbox/grid before the parity score becomes meaningful.`);
-          lines.push(``);
-          lines.push(`What to do:`);
-          lines.push(`1. Read figma-screenshot.png and ai-ready.html`);
-          lines.push(`2. REWRITE the HTML with <header>, <main>, <section>, <footer>`);
-          lines.push(`3. Use flexbox/grid for layout — NO position:absolute for page structure`);
-          lines.push(`4. Expect 65-85% parity on first clean — this is NORMAL`);
-          lines.push(`5. Then iterate to 95%+ from the cleaned version`);
-          lines.push(``);
+        if (result.layoutParity != null) {
+          lines.push(`Layout: ${result.layoutParity.toFixed(1)}%  Font: ${result.fontParity?.toFixed(1) ?? "n/a"}%  Image: ${result.imageParity?.toFixed(1) ?? "n/a"}%  Vector: ${result.vectorParity?.toFixed(1) ?? "n/a"}%`);
         }
-
-        // ── FIRST-ITERATION SUSPICION CHECK ─────────────────────────────
-        // If iteration 1 returns >95% parity, Claude almost certainly submitted
-        // raw HTML with only URL fixes. Flag it.
-        if (iterationCount === 1 && (result.parityScore ?? 0) > 95 && !rawHtmlDetected) {
-          lines.push(`\u{26A0}\u{FE0F} SUSPICIOUSLY HIGH FIRST-ITERATION PARITY (${result.parityScore?.toFixed(1)}%).`);
-          lines.push(`First iteration after cleaning should score 65-85% because you are converting`);
-          lines.push(`absolute positioning to flexbox/grid. >95% on iteration 1 usually means raw`);
-          lines.push(`Figma HTML was submitted without structural cleanup.`);
-          lines.push(`Verify: does your HTML use semantic elements and flexbox/grid? Or is it still`);
-          lines.push(`using position:absolute with pixel coordinates?`);
-          lines.push(``);
+        if (result.topIssue) {
+          lines.push(`Top issue: ${result.topIssue} (${result.topIssueDiffPixels} diff px)`);
         }
+        lines.push(`Duration: ${result.durationMs}ms`);
 
-        // Surface engine validation warnings (skip abs_position if already handled above)
-        if (result.warnings?.length) {
-          for (const w of result.warnings) {
-            if (w.code === "absolute_position" && rawHtmlDetected) continue; // already shown above
-            const icon = w.severity === 'critical' ? '\u{1F6A8}' : '\u{26A0}\u{FE0F}';
-            lines.push(`${icon} [${w.code}] ${w.message}`);
-            if (w.context) lines.push(`   Context: ${w.context}`);
-          }
-          lines.push(``);
-        }
-
-        // Surface MCP-level warnings
-        if (mcpWarnings.length > 0) {
-          lines.push(...mcpWarnings, ``);
-        }
-
-        // MCP-level parity regression check (only on iteration 2+).
+        // Parity regression detection (iteration 2+) — this is actionable data, not a warning
         if (iterationCount >= 2) {
           const compareLogPath = join(wsPath, "frames", String(frameIndex), "compare-log.json");
           if (existsSync(compareLogPath)) {
@@ -508,50 +550,12 @@ export async function startMcpServer(): Promise<void> {
                 const prevParity = logEntries[logEntries.length - 1]?.parity ?? 0;
                 const currentParity = result.parityScore ?? 0;
                 if (currentParity < prevParity - 3) {
-                  lines.push(`\u{1F6A8} PARITY REGRESSION: Previous iteration was ${prevParity.toFixed(1)}%. This iteration scored ${currentParity.toFixed(1)}%. Your latest changes made things WORSE.`);
                   lines.push(``);
+                  lines.push(`REGRESSION: ${prevParity.toFixed(1)}% -> ${currentParity.toFixed(1)}%. Latest changes made things worse.`);
                 }
-              } else {
-                lines.push(`\u{26A0}\u{FE0F} compare-log.json has unexpected format — regression detection skipped for this frame.`);
-                lines.push(``);
               }
-            } catch {
-              lines.push(`\u{26A0}\u{FE0F} compare-log.json is corrupted — regression detection unavailable for this frame.`);
-              lines.push(``);
-            }
+            } catch { /* non-critical */ }
           }
-        }
-
-        lines.push(`Frame ${frameIndex} comparison complete (iteration ${iterationCount})`);
-        lines.push(``);
-
-        // Show parity — but label it as meaningless if raw HTML detected
-        if (rawHtmlDetected) {
-          lines.push(`Raw pixel parity: ${result.parityScore?.toFixed(1) ?? "n/a"}% (NOT MEANINGFUL — clean the HTML first)`);
-        } else {
-          lines.push(`Parity: ${result.parityScore?.toFixed(1) ?? "n/a"}%`);
-        }
-
-        if (result.nonFontParity != null) {
-          lines.push(`Non-font parity: ${result.nonFontParity.toFixed(1)}%`);
-        }
-        if (result.layoutParity != null) {
-          lines.push(`Layout: ${result.layoutParity.toFixed(1)}%  Font: ${result.fontParity?.toFixed(1) ?? "n/a"}%  Image: ${result.imageParity?.toFixed(1) ?? "n/a"}%  Vector: ${result.vectorParity?.toFixed(1) ?? "n/a"}%`);
-        }
-        if (result.topIssue) {
-          lines.push(`Top issue: ${result.topIssue} (${result.topIssueDiffPixels} diff pixels)`);
-        }
-        lines.push(`Duration: ${result.durationMs}ms`);
-        lines.push(``);
-
-        if (rawHtmlDetected) {
-          lines.push(`\u{1F6D1} DO NOT ITERATE ON RAW HTML. Go back and rewrite with semantic structure + flexbox/grid.`);
-        } else if ((result.parityScore ?? 0) >= 95) {
-          lines.push(`Parity is above 95% — frame looks good. You can submit it or keep refining.`);
-        } else if ((result.parityScore ?? 0) >= 85) {
-          lines.push(`Parity is decent but can be improved. Check the diff image below for remaining issues.`);
-        } else {
-          lines.push(`Parity is below 85% — significant differences remain. Review the diff image below.`);
         }
 
         // Build content array with text + inline images

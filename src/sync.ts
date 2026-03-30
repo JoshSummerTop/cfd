@@ -1,4 +1,4 @@
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, writeFile, readdir } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { getCfdDir, type CfdConfig } from "./config.js";
@@ -550,5 +550,45 @@ export async function syncJob(
     workspacePath: wsPath,
     frameCount: frames.length,
     frames: frameSummaries,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Frame clean status — checks .submitted markers for build gate
+// ---------------------------------------------------------------------------
+
+export interface FrameCleanStatus {
+  total: number;
+  cleaned: number;
+  uncleaned: number[];
+}
+
+/**
+ * Check which frames have been cleaned and submitted.
+ * Looks for .submitted marker files in each frame directory.
+ */
+export async function getFrameCleanStatus(jobId: string): Promise<FrameCleanStatus> {
+  const wsPath = getWorkspacePath(jobId);
+  const framesDir = join(wsPath, "frames");
+
+  if (!existsSync(framesDir)) {
+    return { total: 0, cleaned: 0, uncleaned: [] };
+  }
+
+  const entries = await readdir(framesDir);
+  const frameDirs = entries.filter(d => /^\d+$/.test(d)).sort((a, b) => Number(a) - Number(b));
+  const total = frameDirs.length;
+  const uncleaned: number[] = [];
+
+  for (const d of frameDirs) {
+    if (!existsSync(join(framesDir, d, ".submitted"))) {
+      uncleaned.push(Number(d));
+    }
+  }
+
+  return {
+    total,
+    cleaned: total - uncleaned.length,
+    uncleaned,
   };
 }

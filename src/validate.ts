@@ -92,3 +92,145 @@ export function validateCleanedHtml(html: string): HtmlValidationResult {
 export function containsLoopbackUrls(content: string): boolean {
   return LOOPBACK_URL_PATTERN.test(content);
 }
+
+// ---------------------------------------------------------------------------
+// Submission quality gate — BLOCKS submission if HTML fails structural checks
+// ---------------------------------------------------------------------------
+
+export interface SubmissionValidationResult {
+  pass: boolean;
+  errors: string[];   // blocking — submission refused
+  warnings: string[]; // advisory — submission allowed
+}
+
+// Semantic HTML5 elements that indicate structural cleanup was done
+const SEMANTIC_ELEMENTS = /<(?:header|main|section|nav|footer|article)\b/i;
+
+// Flexbox or grid usage in CSS (inline <style> or style attributes)
+const FLEX_OR_GRID = /display\s*:\s*(?:flex|grid)/i;
+
+// Fixed Figma viewport widths on body or wrapper elements
+const FIXED_VIEWPORT_WIDTH =
+  /(?:body|\.wrapper|\.page|\.container|#root|#app|\.site)\s*\{[^}]*width\s*:\s*(?:1440|1920)px/i;
+// Also catch inline style on body/html
+const FIXED_WIDTH_INLINE =
+  /<(?:body|html)[^>]*style="[^"]*width\s*:\s*(?:1440|1920)px/i;
+
+// Count elements with inline style attributes
+const INLINE_STYLE_ATTR = /\s+style\s*=\s*"/gi;
+
+// CSS custom properties in :root
+const CSS_CUSTOM_PROPS = /:root\s*\{[^}]*--/i;
+
+// Responsive media queries
+const MEDIA_QUERY = /@media\s*\(/i;
+
+// BEM-style class names (block__element or block--modifier)
+const BEM_CLASS = /class="[^"]*\b\w+(?:__\w+|--\w+)\b/i;
+
+/**
+ * Validate cleaned HTML for submission quality.
+ * Returns blocking errors and advisory warnings.
+ * Used by submit_cleaned_frame to enforce structural quality.
+ */
+export function validateForSubmission(html: string): SubmissionValidationResult {
+  const errors: string[] = [];
+  const warnings: string[] = [];
+
+  // --- Blocking: Raw HTML detection (reuse existing logic) ---
+  const validation = validateCleanedHtml(html);
+  if (validation.isRawHtml) {
+    errors.push(
+      `Raw Figma HTML detected (${_countAbsPositioned(html)} elements with position:absolute + px coordinates). ` +
+      `Rewrite with semantic HTML and flexbox/grid layout.`
+    );
+  }
+
+  // --- Blocking: Localhost/engine URLs ---
+  if (validation.warnings.some(w => w.includes('[localhost_url]') || w.includes('[engine_url]'))) {
+    errors.push(
+      `HTML contains localhost or engine API URLs in image/asset references. ` +
+      `Use relative paths: images/{hash}.png`
+    );
+  }
+
+  // --- Blocking: No semantic elements ---
+  if (!SEMANTIC_ELEMENTS.test(html)) {
+    errors.push(
+      `No semantic HTML elements found (header, main, section, nav, footer, article). ` +
+      `Production code must use semantic HTML structure.`
+    );
+  }
+
+  // --- Blocking: No flexbox/grid ---
+  if (!FLEX_OR_GRID.test(html)) {
+    errors.push(
+      `No flexbox or grid layout found (display: flex or display: grid). ` +
+      `Production code must use modern CSS layout, not absolute positioning.`
+    );
+  }
+
+  // --- Blocking: Fixed Figma viewport width ---
+  if (FIXED_VIEWPORT_WIDTH.test(html) || FIXED_WIDTH_INLINE.test(html)) {
+    errors.push(
+      `Fixed Figma viewport width detected (1440px or 1920px on body/wrapper). ` +
+      `Use max-width or responsive units instead.`
+    );
+  }
+
+  // --- Blocking: Excessive inline styles ---
+  const inlineStyleCount = (html.match(INLINE_STYLE_ATTR) || []).length;
+  if (inlineStyleCount > 30) {
+    errors.push(
+      `Excessive inline styles: ${inlineStyleCount} elements with style="" attributes. ` +
+      `Move styles to a <style> block with proper CSS classes.`
+    );
+  }
+
+  // --- Warning: No CSS custom properties ---
+  if (!CSS_CUSTOM_PROPS.test(html)) {
+    warnings.push(
+      `No CSS custom properties found (:root with -- variables). ` +
+      `Consider extracting colors, fonts, and spacing to custom properties.`
+    );
+  }
+
+  // --- Warning: No responsive media queries ---
+  if (!MEDIA_QUERY.test(html)) {
+    warnings.push(
+      `No responsive media queries found. ` +
+      `Production code should include breakpoints for mobile/tablet/desktop.`
+    );
+  }
+
+  // --- Warning: No BEM class naming ---
+  if (!BEM_CLASS.test(html)) {
+    warnings.push(
+      `No BEM-style class names detected (block__element or block--modifier). ` +
+      `Consider using BEM for organized, maintainable CSS.`
+    );
+  }
+
+  return {
+    pass: errors.length === 0,
+    errors,
+    warnings,
+  };
+}
+
+/** Count absolute-positioned elements with px coordinates (internal helper) */
+function _countAbsPositioned(html: string): number {
+  RAW_HTML_STYLE_ATTR_DOUBLE.lastIndex = 0;
+  RAW_HTML_STYLE_ATTR_SINGLE.lastIndex = 0;
+  const d = (html.match(RAW_HTML_STYLE_ATTR_DOUBLE) || []).length;
+  const s = (html.match(RAW_HTML_STYLE_ATTR_SINGLE) || []).length;
+  let inBlocks = 0;
+  STYLE_BLOCK_PATTERN.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = STYLE_BLOCK_PATTERN.exec(html)) !== null) {
+    ABS_POS_IN_CSS.lastIndex = 0;
+    const cm = m[1].match(ABS_POS_IN_CSS);
+    if (cm) inBlocks += cm.length;
+  }
+  return d + s + inBlocks;
+}
