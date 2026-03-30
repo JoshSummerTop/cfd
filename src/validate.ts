@@ -1,100 +1,15 @@
 /**
- * Shared HTML validation for cleaned frames.
- * Used by both compare and submit_cleaned_frame to catch common issues
- * before sending HTML to the engine.
+ * HTML validation for cleaned frames.
+ *
+ * validateForSubmission() is the single entry point — used by both the
+ * submit_cleaned_frame gate and the standalone validate tool.
  */
 
-export interface HtmlValidationResult {
-  warnings: string[];
-  isRawHtml: boolean;
-}
-
-// Matches localhost, 127.0.0.1, 0.0.0.0, [::1] in URLs
-const LOOPBACK_URL_PATTERN =
-  /https?:\/\/(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\])/i;
-
-// Matches localhost/loopback in src= or url( contexts specifically
-const LOOPBACK_SRC_PATTERN =
-  /(?:src|url)\s*[=(]\s*['"]?https?:\/\/(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\])/i;
-
-// Matches engine production URL in src= or url( contexts
-const ENGINE_URL_PATTERN =
-  /(?:src|url)\s*[=(]\s*['"]?https?:\/\/engine\.codefromdesign/i;
-
-// Raw Figma HTML: position:absolute with px top/left in style attributes (double or single quotes)
-const RAW_HTML_STYLE_ATTR_DOUBLE =
-  /style="[^"]*position\s*:\s*absolute[^"]*(?:top|left)\s*:\s*\d+px/gi;
-const RAW_HTML_STYLE_ATTR_SINGLE =
-  /style='[^']*position\s*:\s*absolute[^']*(?:top|left)\s*:\s*\d+px/gi;
-
-// Raw Figma HTML inside <style> blocks: position:absolute with px top/left
-const STYLE_BLOCK_PATTERN = /<style[^>]*>([\s\S]*?)<\/style>/gi;
-const ABS_POS_IN_CSS =
-  /position\s*:\s*absolute[\s\S]*?(?:top|left)\s*:\s*\d+px/gi;
-
-/**
- * Validate cleaned HTML for common issues.
- * Returns warnings (non-blocking) and whether raw Figma HTML was detected.
- */
-export function validateCleanedHtml(html: string): HtmlValidationResult {
-  const warnings: string[] = [];
-  let isRawHtml = false;
-
-  // --- Localhost / loopback detection ---
-  if (LOOPBACK_SRC_PATTERN.test(html)) {
-    warnings.push(
-      `\u{1F6A8} [localhost_url] cleaned.html contains localhost/loopback URLs in image/asset references. Use relative paths: images/{hash}.png`
-    );
-  }
-
-  // --- Engine URL detection ---
-  if (ENGINE_URL_PATTERN.test(html)) {
-    warnings.push(
-      `\u{1F6A8} [engine_url] cleaned.html contains engine API URLs in image/asset references. Use relative paths: images/{hash}.png`
-    );
-  }
-
-  // --- Raw HTML detection (absolute positioning with px coordinates) ---
-  // Check style attributes (both double and single quotes)
-  const absDoubleQuote = (html.match(RAW_HTML_STYLE_ATTR_DOUBLE) || []).length;
-  const absSingleQuote = (html.match(RAW_HTML_STYLE_ATTR_SINGLE) || []).length;
-
-  // Check <style> blocks for the same pattern
-  let absInStyleBlocks = 0;
-  let match: RegExpExecArray | null;
-  // Reset lastIndex before use
-  STYLE_BLOCK_PATTERN.lastIndex = 0;
-  while ((match = STYLE_BLOCK_PATTERN.exec(html)) !== null) {
-    const cssContent = match[1];
-    ABS_POS_IN_CSS.lastIndex = 0;
-    const cssMatches = cssContent.match(ABS_POS_IN_CSS);
-    if (cssMatches) {
-      absInStyleBlocks += cssMatches.length;
-    }
-  }
-
-  const totalAbsWithPx = absDoubleQuote + absSingleQuote + absInStyleBlocks;
-
-  if (totalAbsWithPx > 20) {
-    isRawHtml = true;
-    warnings.push(
-      `\u{1F6D1} RAW HTML DETECTED: Found ${totalAbsWithPx} elements with position:absolute + pixel coordinates (${absDoubleQuote} in style="", ${absSingleQuote} in style='', ${absInStyleBlocks} in <style> blocks). This is raw Figma output — rewrite with semantic HTML and flexbox/grid.`
-    );
-  }
-
-  return { warnings, isRawHtml };
-}
-
-/**
- * Check HTML content for loopback/localhost URLs (broader check for full file scanning).
- * Used by submit_website to scan all HTML files.
- */
-export function containsLoopbackUrls(content: string): boolean {
-  return LOOPBACK_URL_PATTERN.test(content);
-}
+import { existsSync } from "node:fs";
+import { join } from "node:path";
 
 // ---------------------------------------------------------------------------
-// Submission quality gate — BLOCKS submission if HTML fails structural checks
+// Result types
 // ---------------------------------------------------------------------------
 
 export interface SubmissionValidationResult {
@@ -103,53 +18,100 @@ export interface SubmissionValidationResult {
   warnings: string[]; // advisory — submission allowed
 }
 
-// Semantic HTML5 elements that indicate structural cleanup was done
+// ---------------------------------------------------------------------------
+// Patterns
+// ---------------------------------------------------------------------------
+
+// Localhost/loopback in src= or url( contexts
+const LOOPBACK_SRC_PATTERN =
+  /(?:src|url)\s*[=(]\s*['"]?https?:\/\/(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\])/i;
+
+// Engine production URL in src= or url( contexts
+const ENGINE_URL_PATTERN =
+  /(?:src|url)\s*[=(]\s*['"]?https?:\/\/engine\.codefromdesign/i;
+
+// Broader loopback check (for submit_website HTML scanning)
+const LOOPBACK_URL_PATTERN =
+  /https?:\/\/(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\])/i;
+
+// Raw Figma HTML: position:absolute with LARGE px coordinates (>100px).
+// This detects Figma's coordinate system (top:200px;left:500px) not
+// legitimate overlay patterns (top:24px;right:24px within a relative container).
+const RAW_FIGMA_ABS_STYLE_DOUBLE =
+  /style="[^"]*position\s*:\s*absolute[^"]*(?:top|left)\s*:\s*(?:1\d{2,}|[2-9]\d{2,}|\d{4,})px/gi;
+const RAW_FIGMA_ABS_STYLE_SINGLE =
+  /style='[^']*position\s*:\s*absolute[^']*(?:top|left)\s*:\s*(?:1\d{2,}|[2-9]\d{2,}|\d{4,})px/gi;
+
+// Same pattern inside <style> blocks
+const STYLE_BLOCK_PATTERN = /<style[^>]*>([\s\S]*?)<\/style>/gi;
+const RAW_FIGMA_ABS_IN_CSS =
+  /position\s*:\s*absolute[\s\S]*?(?:top|left)\s*:\s*(?:1\d{2,}|[2-9]\d{2,}|\d{4,})px/gi;
+
+// Semantic HTML5 elements
 const SEMANTIC_ELEMENTS = /<(?:header|main|section|nav|footer|article)\b/i;
 
-// Flexbox or grid usage in CSS (inline <style> or style attributes)
+// Flexbox or grid usage
 const FLEX_OR_GRID = /display\s*:\s*(?:flex|grid)/i;
 
-// Fixed Figma viewport widths on body or wrapper elements
+// Fixed Figma viewport widths on body/wrapper
 const FIXED_VIEWPORT_WIDTH =
   /(?:body|\.wrapper|\.page|\.container|#root|#app|\.site)\s*\{[^}]*width\s*:\s*(?:1440|1920)px/i;
-// Also catch inline style on body/html
 const FIXED_WIDTH_INLINE =
   /<(?:body|html)[^>]*style="[^"]*width\s*:\s*(?:1440|1920)px/i;
 
-// Count elements with inline style attributes
+// Count inline style attributes
 const INLINE_STYLE_ATTR = /\s+style\s*=\s*"/gi;
 
 // CSS custom properties in :root
 const CSS_CUSTOM_PROPS = /:root\s*\{[^}]*--/i;
 
-// Responsive media queries
-const MEDIA_QUERY = /@media\s*\(/i;
-
-// BEM-style class names (block__element or block--modifier)
+// BEM-style class names
 const BEM_CLASS = /class="[^"]*\b\w+(?:__\w+|--\w+)\b/i;
 
+// Image src paths for resolution check
+const IMG_SRC_PATTERN = /src=["']([^"']+)["']/gi;
+
+// ---------------------------------------------------------------------------
+// Main validation function
+// ---------------------------------------------------------------------------
+
 /**
- * Validate cleaned HTML for submission quality.
+ * Validate cleaned HTML for structural quality.
  * Returns blocking errors and advisory warnings.
- * Used by submit_cleaned_frame to enforce structural quality.
+ *
+ * Used by:
+ * - submit_cleaned_frame (gate — blocks on errors)
+ * - validate tool (standalone — returns results for inspection)
+ *
+ * @param html The cleaned HTML content
+ * @param imagesDir Optional path to the frame's images/ directory for path resolution
  */
-export function validateForSubmission(html: string): SubmissionValidationResult {
+export function validateForSubmission(
+  html: string,
+  imagesDir?: string,
+): SubmissionValidationResult {
   const errors: string[] = [];
   const warnings: string[] = [];
 
-  // --- Blocking: Raw HTML detection (reuse existing logic) ---
-  const validation = validateCleanedHtml(html);
-  if (validation.isRawHtml) {
+  // --- Blocking: Raw Figma absolute positioning (large px coords) ---
+  const absCount = countRawFigmaAbsPositioned(html);
+  if (absCount > 10) {
     errors.push(
-      `Raw Figma HTML detected (${_countAbsPositioned(html)} elements with position:absolute + px coordinates). ` +
-      `Rewrite with semantic HTML and flexbox/grid layout.`
+      `Raw Figma positioning detected (${absCount} elements with position:absolute + large px coordinates like top:200px;left:500px). ` +
+      `Use flexbox/grid for page layout. position:absolute is fine for overlays within relative containers.`
     );
   }
 
   // --- Blocking: Localhost/engine URLs ---
-  if (validation.warnings.some(w => w.includes('[localhost_url]') || w.includes('[engine_url]'))) {
+  if (LOOPBACK_SRC_PATTERN.test(html)) {
     errors.push(
-      `HTML contains localhost or engine API URLs in image/asset references. ` +
+      `HTML contains localhost/loopback URLs in image/asset references. ` +
+      `Use relative paths: images/{hash}.png`
+    );
+  }
+  if (ENGINE_URL_PATTERN.test(html)) {
+    errors.push(
+      `HTML contains engine API URLs in image/asset references. ` +
       `Use relative paths: images/{hash}.png`
     );
   }
@@ -166,7 +128,7 @@ export function validateForSubmission(html: string): SubmissionValidationResult 
   if (!FLEX_OR_GRID.test(html)) {
     errors.push(
       `No flexbox or grid layout found (display: flex or display: grid). ` +
-      `Production code must use modern CSS layout, not absolute positioning.`
+      `Production code must use modern CSS layout.`
     );
   }
 
@@ -195,15 +157,36 @@ export function validateForSubmission(html: string): SubmissionValidationResult 
     );
   }
 
-  // Note: @media queries are NOT checked here — responsiveness is a Job 2 (website build)
-  // concern, not a frame cleaning concern. Each frame targets one viewport.
-
   // --- Warning: No BEM class naming ---
   if (!BEM_CLASS.test(html)) {
     warnings.push(
       `No BEM-style class names detected (block__element or block--modifier). ` +
       `Consider using BEM for organized, maintainable CSS.`
     );
+  }
+
+  // --- Warning: Image path resolution ---
+  if (imagesDir) {
+    IMG_SRC_PATTERN.lastIndex = 0;
+    let imgMatch: RegExpExecArray | null;
+    const missingImages: string[] = [];
+    while ((imgMatch = IMG_SRC_PATTERN.exec(html)) !== null) {
+      const src = imgMatch[1];
+      // Only check relative image paths (not data: URIs, external URLs, or SVGs)
+      if (src.startsWith("images/") && !src.startsWith("data:")) {
+        const filename = src.replace(/^images\//, "");
+        if (!existsSync(join(imagesDir, filename))) {
+          missingImages.push(src);
+        }
+      }
+    }
+    if (missingImages.length > 0) {
+      warnings.push(
+        `${missingImages.length} image path(s) reference files not found in images/ directory: ` +
+        missingImages.slice(0, 5).join(", ") +
+        (missingImages.length > 5 ? ` (and ${missingImages.length - 5} more)` : "")
+      );
+    }
   }
 
   return {
@@ -213,19 +196,37 @@ export function validateForSubmission(html: string): SubmissionValidationResult 
   };
 }
 
-/** Count absolute-positioned elements with px coordinates (internal helper) */
-function _countAbsPositioned(html: string): number {
-  RAW_HTML_STYLE_ATTR_DOUBLE.lastIndex = 0;
-  RAW_HTML_STYLE_ATTR_SINGLE.lastIndex = 0;
-  const d = (html.match(RAW_HTML_STYLE_ATTR_DOUBLE) || []).length;
-  const s = (html.match(RAW_HTML_STYLE_ATTR_SINGLE) || []).length;
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Count elements with raw Figma absolute positioning (large px coordinates).
+ * Only counts top/left values >100px which indicate Figma's coordinate system.
+ * Small values (top:24px;right:24px) are legitimate overlay CSS.
+ */
+function countRawFigmaAbsPositioned(html: string): number {
+  RAW_FIGMA_ABS_STYLE_DOUBLE.lastIndex = 0;
+  RAW_FIGMA_ABS_STYLE_SINGLE.lastIndex = 0;
+  const d = (html.match(RAW_FIGMA_ABS_STYLE_DOUBLE) || []).length;
+  const s = (html.match(RAW_FIGMA_ABS_STYLE_SINGLE) || []).length;
+
   let inBlocks = 0;
   STYLE_BLOCK_PATTERN.lastIndex = 0;
   let m: RegExpExecArray | null;
   while ((m = STYLE_BLOCK_PATTERN.exec(html)) !== null) {
-    ABS_POS_IN_CSS.lastIndex = 0;
-    const cm = m[1].match(ABS_POS_IN_CSS);
+    RAW_FIGMA_ABS_IN_CSS.lastIndex = 0;
+    const cm = m[1].match(RAW_FIGMA_ABS_IN_CSS);
     if (cm) inBlocks += cm.length;
   }
+
   return d + s + inBlocks;
+}
+
+/**
+ * Check HTML content for loopback/localhost URLs (broader check).
+ * Used by submit_website to scan all HTML files.
+ */
+export function containsLoopbackUrls(content: string): boolean {
+  return LOOPBACK_URL_PATTERN.test(content);
 }

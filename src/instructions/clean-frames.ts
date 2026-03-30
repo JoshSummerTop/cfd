@@ -62,17 +62,19 @@ Work like a developer looking at a design mockup:
 3. **READ** \`ai-ready.html\` — extract all content (text, colors, fonts, image refs). Resolve images via \`image-map.json\`, SVGs via \`svg-map.json\`.
 4. **WRITE** \`cleaned.html\` with:
    - Semantic HTML: \`<header>\`, \`<main>\`, \`<section>\`, \`<footer>\` (use manifest section roles)
-   - Flexbox/grid layout from manifest \`autoLayout\` — no \`position:absolute\` for page structure
+   - Flexbox/grid for page-level layout (section stacking, columns, grids)
+   - \`position:absolute\` within \`position:relative\` containers for overlays (badges, captions, hover states on images) — this is standard production CSS
    - CSS custom properties in \`:root\`
    - BEM class names (\`.hero__title\`, \`.card__image\`, \`.btn--primary\`)
    - ALL content from the design — every element visible in the Figma screenshot
    - Match the frame's exact dimensions — responsiveness comes later in Job 2
-5. **COMPARE** — call \`compare\` to get a parity score and diff image
-6. **READ** the diff image + \`issue-diff.json\` — identify fixable vs unfixable issues
-7. **FIX** fixable issues in cleaned.html
-8. **COMPARE** again — parity should improve
-9. **REPEAT** until parity > 90% or remaining diffs are all unfixable (max 5 iterations)
-10. **SUBMIT** — call \`submit_cleaned_frame\` (blocks if quality checks fail)
+5. **VALIDATE** — call \`validate\` to instantly check structural quality (no server round-trip). Fix any errors before proceeding.
+6. **COMPARE** — call \`compare\` to get a parity score and diff image
+7. **READ** the diff image + \`issue-diff.json\` — identify fixable vs unfixable issues
+8. **FIX** fixable issues in cleaned.html
+9. **COMPARE** again — parity should improve
+10. **REPEAT** until parity > 90% or remaining diffs are all unfixable (max 5 iterations)
+11. **SUBMIT** — call \`submit_cleaned_frame\` (blocks if quality checks fail)
 
 ## Cleaning Is Mandatory for ALL Frames
 
@@ -92,8 +94,8 @@ After 5 iterations without reaching 90%, check \`issue-diff.json\`. If remaining
 
 ## What Gets Blocked at Submission
 
-The \`submit_cleaned_frame\` tool runs structural quality checks. Submission is REFUSED if:
-- More than 20 elements with \`position:absolute\` + px coordinates
+The \`submit_cleaned_frame\` tool (and \`validate\`) runs structural quality checks. Submission is REFUSED if:
+- Raw Figma positioning detected (many elements with \`position:absolute\` + large px coordinates like top:200px;left:500px)
 - No semantic elements (\`<header>\`, \`<main>\`, \`<section>\`, etc.)
 - No \`display: flex\` or \`display: grid\` in CSS
 - Fixed Figma viewport width (1440px or 1920px on body/wrapper)
@@ -108,7 +110,7 @@ The \`submit_cleaned_frame\` tool runs structural quality checks. Submission is 
 - Add UI elements not visible in the Figma screenshot
 - Skip sections visible in the screenshot — missing content is a failure
 - Iterate more than 5 times per frame without asking the user
-- Use \`position:absolute\` for page-level layout
+- Use \`position:absolute\` for page-level layout (flexbox/grid instead). It IS correct for overlays within relative containers.
 - Use inline \`style=""\` on structural elements
 - Add responsive \`@media\` queries — that is Job 2 (website build), not frame cleaning
 

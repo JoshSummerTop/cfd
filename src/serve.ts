@@ -214,7 +214,8 @@ export async function startMcpServer(): Promise<void> {
         const html = await readFile(cleanedPath, "utf-8");
 
         // --- Structural quality gate — BLOCKS on failure ---
-        const submission = validateForSubmission(html);
+        const imagesDir = join(wsPath, "frames", String(frameIndex), "images");
+        const submission = validateForSubmission(html, existsSync(imagesDir) ? imagesDir : undefined);
         if (!submission.pass) {
           const lines = [
             `SUBMISSION BLOCKED — cleaned.html failed structural quality checks:\n`,
@@ -260,6 +261,45 @@ export async function startMcpServer(): Promise<void> {
         return { content: [{ type: "text", text: lines.join("\n") }] };
       } catch (err: any) {
         return { content: [{ type: "text", text: `Submit failed: ${err.message}` }] };
+      }
+    }
+  );
+
+  // --- Tool: validate ---
+  server.tool(
+    "validate",
+    "Instant structural quality check on cleaned.html — no server round-trip. Runs the same checks as submit_cleaned_frame's gate. Call this before compare to catch issues early.",
+    {
+      jobId: z.string().describe("The job ID"),
+      frameIndex: z.number().describe("The frame index (0-based)"),
+    },
+    async ({ jobId, frameIndex }) => {
+      try {
+        const wsPath = getWorkspacePath(jobId);
+        const cleanedPath = join(wsPath, "frames", String(frameIndex), "cleaned.html");
+
+        if (!existsSync(cleanedPath)) {
+          return { content: [{ type: "text", text: `No cleaned.html found at ${cleanedPath}. Write cleaned HTML first.` }] };
+        }
+
+        const html = await readFile(cleanedPath, "utf-8");
+        const imagesDir = join(wsPath, "frames", String(frameIndex), "images");
+        const result = validateForSubmission(html, existsSync(imagesDir) ? imagesDir : undefined);
+
+        const lines: string[] = [];
+        if (result.pass) {
+          lines.push(`PASSED — cleaned.html meets structural quality requirements.`);
+        } else {
+          lines.push(`FAILED — ${result.errors.length} blocking issue(s):\n`);
+          lines.push(...result.errors.map(e => `  FAIL: ${e}`));
+        }
+        if (result.warnings.length > 0) {
+          lines.push(``, `Warnings:`, ...result.warnings.map(w => `  WARN: ${w}`));
+        }
+
+        return { content: [{ type: "text", text: lines.join("\n") }] };
+      } catch (err: any) {
+        return { content: [{ type: "text", text: `Validate failed: ${err.message}` }] };
       }
     }
   );

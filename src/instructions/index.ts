@@ -37,6 +37,7 @@ You work with CodeFromDesign to convert Figma designs into production websites.
 | \`list\` | List projects with status and parity scores |
 | \`sync\` | Download all frame data to workspace |
 | \`sync_frame\` | Re-sync one frame (faster than full sync) |
+| \`validate\` | Instant structural quality check — no server call. Call before compare. |
 | \`compare\` | Screenshot your cleaned.html, measure parity, get diff image |
 | \`submit_cleaned_frame\` | Submit cleaned HTML (BLOCKS if quality checks fail) |
 | \`check_readiness\` | Check if all frames are clean — returns Job 2 instructions |
