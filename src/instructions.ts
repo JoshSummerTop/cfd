@@ -23,7 +23,9 @@ IMAGE PATHS: NEVER use localhost URLs, API URLs, or any http:// path in image re
 
 NO HALLUCINATED UI: The build-guide.json "navigation" array is metadata for FILE LINKING ONLY — it is NOT a list of nav links to render as a visible element. The Figma screenshot is the SOLE authority on what navigation looks like. If you cannot point to an element in figma-screenshot.png, it does not exist in your output.
 
-WORKFLOW ORDER: list → sync → analyze → clean → compare → iterate → assemble website → submit_website. NEVER call get_snips proactively. Only call get_snips when the user pastes snip metadata into the conversation.`;
+WORKFLOW ORDER: list → sync → analyze → reason about website → clean → compare → iterate → assemble website → submit_website. NEVER call get_snips proactively. Only call get_snips when the user pastes snip metadata into the conversation.
+
+FIRST-COMPARE CHECK: If your first compare for a frame returns >95% parity, STOP. You almost certainly submitted raw Figma HTML without cleaning. Raw HTML gets 99% parity because it renders pixel-perfectly — but it uses position:absolute on hundreds of elements and is NOT a functional website. Go back and REWRITE with semantic HTML + flexbox/grid. Expect 65-85% on first clean — that is NORMAL.`;
 
 // ---------------------------------------------------------------------------
 // Section: Preamble
@@ -268,6 +270,43 @@ Start by reading \`job.json\` and \`build-guide.json\`:
 **Log your analysis to session-log.md.**`;
 
 // ---------------------------------------------------------------------------
+// Section: Phase A2 — Reason About the Website
+// ---------------------------------------------------------------------------
+const PHASE_A2_REASON = `## Phase A2: Reason About the Website
+
+**BEFORE cleaning any HTML, you must understand WHAT you are building.** Frames are raw design assets — they are NOT automatically pages. You must apply human reasoning to decide the website structure.
+
+### Step 1: What is this website?
+Look at all Figma screenshots together. Determine:
+- What kind of site is this? (E-commerce, portfolio, blog, SaaS landing, corporate, etc.)
+- Who is the target audience?
+- What is the primary user journey?
+
+### Step 2: Classify each frame
+build-guide.json auto-classifies frames based on names, but these are HEURISTICS — you must verify and override. For each frame, determine its type:
+
+| Type | Description | Example | Website treatment |
+|------|-------------|---------|-------------------|
+| **page** | A full standalone page | Home, Shop, About, Contact | Becomes its own HTML file |
+| **overlay** | A modal/sidebar/popup that appears ON another page | Cart Sidebar, Quick View, Search Modal | Becomes a component within a parent page |
+| **component** | A reusable UI element shown in isolation | Header, Footer, Newsletter Signup | Integrated into the pages that use it |
+| **state** | A different state of an existing page | Cart Empty, Cart Full, 404 | Informs the page design but is NOT a separate page |
+
+**Key test:** Would a real user navigate directly to this URL? If yes → page. If no → overlay/component/state.
+
+### Step 3: Plan the website structure
+Write to session-log.md:
+- List of pages you will build (with which frames they use)
+- List of overlays and which pages they belong to
+- Navigation plan (what links appear in the nav, matching Figma screenshots)
+- Any frames you are NOT building as standalone pages, and why
+
+### Step 4: Override build-guide.json if needed
+build-guide.json is a STARTING POINT, not gospel. If it classifies "Cart Sidebar" as a page, your session plan overrides that. When assembling in Phase C, follow YOUR plan, not blind build-guide mappings.
+
+**This phase is MANDATORY. Skipping it leads to mechanical frame-to-page mapping that produces 9 disconnected HTML files instead of a coherent website.**`;
+
+// ---------------------------------------------------------------------------
 // Section: Phase B — Clean Frames
 // ---------------------------------------------------------------------------
 const PHASE_B_CLEAN_FRAMES = `## Phase B: Clean Each Frame
@@ -294,7 +333,12 @@ For each frame:
 
 **Minimum 2 iterations per frame.** Your first pass will never be perfect. Always compare, read the diff, fix issues, and compare again. If you submit after a single pass without comparing, you are doing it wrong.
 
-**PARITY REGRESSION GUARD:** Your first compare (iteration 1) may score lower than the raw Figma HTML — this is normal because you are converting absolute positioning to semantic/responsive layout. On iteration 2 and beyond, parity should IMPROVE with each iteration. If parity DROPS between iterations (e.g., iteration 2 scores lower than iteration 1), STOP — your latest changes made things worse. The compare tool will warn you if regression is detected on iteration 2+.
+**EXPECTED PARITY BY ITERATION:**
+- **Iteration 1 (first clean):** 65-85% parity. This is NORMAL — you converted absolute positioning to flexbox/grid, which changes pixel layout. If you get >95% on iteration 1, you did NOT clean the HTML. The compare tool will flag this.
+- **Iteration 2:** 80-92% — layout fixes, spacing corrections, image sizing.
+- **Iteration 3-5:** 90-97% — fine-tuning to reach the 95% target.
+
+**PARITY REGRESSION GUARD:** On iteration 2 and beyond, parity should IMPROVE with each iteration. If parity DROPS between iterations (e.g., iteration 2 scores lower than iteration 1), STOP — your latest changes made things worse. The compare tool will warn you if regression is detected on iteration 2+.
 
 **Maximum 5 iterations per frame.** If after 5 compare iterations you still haven't reached 95% parity, STOP and notify the user. Report the current parity score, what the remaining issues are (based on the diff colors), and ask for guidance. Do NOT keep iterating endlessly — diminishing returns burn usage quickly.
 
@@ -687,6 +731,7 @@ export const MCP_INSTRUCTIONS = [
   SESSION_LOGGING,
   WORKSPACE_STRUCTURE,
   PHASE_A_ANALYZE,
+  PHASE_A2_REASON,
   PHASE_B_CLEAN_FRAMES,
   PHASE_C_ASSEMBLE,
   PHASE_D_SUBMIT,

@@ -163,10 +163,41 @@ function generateBuildGuide(
   // Navigation = page names in order (for file linking, NOT for rendering as a visible nav bar)
   const navigation = pages.map((p) => p.name);
 
+  // Auto-classify frames by name heuristics
+  const frameClassifications: Record<string, { type: string; name: string; note?: string }> = {};
+  const overlayKeywords = ["sidebar", "modal", "popup", "overlay", "drawer", "dropdown", "lightbox", "dialog", "panel", "flyout", "quick view", "quickview"];
+  const componentKeywords = ["component", "header only", "footer only", "nav only", "widget"];
+  const stateKeywords = ["hover", "active", "state", "empty", "error", "loading", "selected", "disabled", "open", "closed"];
+
+  for (const frame of frames) {
+    const nameLower = frame.name.toLowerCase();
+    let type = "page";
+    let note: string | undefined;
+
+    if (overlayKeywords.some((kw) => nameLower.includes(kw))) {
+      type = "overlay";
+      note = "Auto-detected as overlay/modal. Likely appears ON another page, not as a standalone page.";
+    } else if (componentKeywords.some((kw) => nameLower.includes(kw))) {
+      type = "component";
+      note = "Auto-detected as reusable component. Integrate into pages that use it.";
+    } else if (stateKeywords.some((kw) => nameLower.includes(kw))) {
+      type = "state";
+      note = "Auto-detected as a state variation. Informs page design but is NOT a separate page.";
+    }
+
+    frameClassifications[String(frame.index)] = {
+      type,
+      name: frame.name,
+      ...(note && { note }),
+    };
+  }
+
   return {
     pages,
     navigation,
     navigationNote: "This array lists ALL pages for inter-page LINKING (href targets). It does NOT define the visible nav bar. The visible nav bar must match the Figma screenshot exactly — most designs show only 3-5 main links, not every page.",
+    frameClassifications,
+    classificationNote: "Auto-detected frame types. REVIEW these in Phase A2 — override any misclassifications in your session plan. Not every frame should become a standalone page.",
     breakpoints,
     outputStructure: {
       root: "website/",

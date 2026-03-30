@@ -388,10 +388,51 @@ export async function startMcpServer(): Promise<void> {
         const result = await res.json();
 
         const lines: string[] = [];
+        const iterationCount = result.iterationCount ?? 1;
 
-        // Surface engine validation warnings first (most important)
+        // ── RAW HTML DETECTION ──────────────────────────────────────────
+        // Check if engine flagged excessive absolute positioning (raw Figma HTML).
+        // This is the #1 failure mode: Claude submits raw HTML unchanged, gets 99%
+        // parity, and stops — producing a non-functional website.
+        let rawHtmlDetected = false;
+        const absWarning = result.warnings?.find((w: any) => w.code === "absolute_position");
+        if (absWarning) {
+          // Extract count from message like "...on 289 elements..."
+          const countMatch = absWarning.message?.match(/(\d+)\s+elements/);
+          const absCount = countMatch ? parseInt(countMatch[1], 10) : 0;
+          if (absCount > 20) {
+            rawHtmlDetected = true;
+            lines.push(`\u{1F6D1} RAW HTML DETECTED: Your HTML has ${absCount} absolute-positioned elements.`);
+            lines.push(`This is raw Figma output, NOT cleaned HTML. You MUST convert to semantic HTML`);
+            lines.push(`with flexbox/grid before the parity score becomes meaningful.`);
+            lines.push(``);
+            lines.push(`What to do:`);
+            lines.push(`1. Read figma-screenshot.png and ai-ready.html`);
+            lines.push(`2. REWRITE the HTML with <header>, <main>, <section>, <footer>`);
+            lines.push(`3. Use flexbox/grid for layout — NO position:absolute for page structure`);
+            lines.push(`4. Expect 65-85% parity on first clean — this is NORMAL`);
+            lines.push(`5. Then iterate to 95%+ from the cleaned version`);
+            lines.push(``);
+          }
+        }
+
+        // ── FIRST-ITERATION SUSPICION CHECK ─────────────────────────────
+        // If iteration 1 returns >95% parity, Claude almost certainly submitted
+        // raw HTML with only URL fixes. Flag it.
+        if (iterationCount === 1 && (result.parityScore ?? 0) > 95 && !rawHtmlDetected) {
+          lines.push(`\u{26A0}\u{FE0F} SUSPICIOUSLY HIGH FIRST-ITERATION PARITY (${result.parityScore?.toFixed(1)}%).`);
+          lines.push(`First iteration after cleaning should score 65-85% because you are converting`);
+          lines.push(`absolute positioning to flexbox/grid. >95% on iteration 1 usually means raw`);
+          lines.push(`Figma HTML was submitted without structural cleanup.`);
+          lines.push(`Verify: does your HTML use semantic elements and flexbox/grid? Or is it still`);
+          lines.push(`using position:absolute with pixel coordinates?`);
+          lines.push(``);
+        }
+
+        // Surface engine validation warnings (skip abs_position if already handled above)
         if (result.warnings?.length) {
           for (const w of result.warnings) {
+            if (w.code === "absolute_position" && rawHtmlDetected) continue; // already shown above
             const icon = w.severity === 'critical' ? '\u{1F6A8}' : '\u{26A0}\u{FE0F}';
             lines.push(`${icon} [${w.code}] ${w.message}`);
             if (w.context) lines.push(`   Context: ${w.context}`);
@@ -405,9 +446,6 @@ export async function startMcpServer(): Promise<void> {
         }
 
         // MCP-level parity regression check (only on iteration 2+).
-        // Iteration 1 converts absolute-positioned Figma HTML to semantic/responsive
-        // HTML — parity drop from raw HTML is expected and normal.
-        const iterationCount = result.iterationCount ?? 1;
         if (iterationCount >= 2) {
           const compareLogPath = join(wsPath, "frames", String(frameIndex), "compare-log.json");
           if (existsSync(compareLogPath)) {
@@ -425,9 +463,15 @@ export async function startMcpServer(): Promise<void> {
           }
         }
 
-        lines.push(`Frame ${frameIndex} comparison complete (iteration ${result.iterationCount})`);
+        lines.push(`Frame ${frameIndex} comparison complete (iteration ${iterationCount})`);
         lines.push(``);
-        lines.push(`Parity: ${result.parityScore?.toFixed(1) ?? "n/a"}%`);
+
+        // Show parity — but label it as meaningless if raw HTML detected
+        if (rawHtmlDetected) {
+          lines.push(`Raw pixel parity: ${result.parityScore?.toFixed(1) ?? "n/a"}% (NOT MEANINGFUL — clean the HTML first)`);
+        } else {
+          lines.push(`Parity: ${result.parityScore?.toFixed(1) ?? "n/a"}%`);
+        }
 
         if (result.nonFontParity != null) {
           lines.push(`Non-font parity: ${result.nonFontParity.toFixed(1)}%`);
@@ -441,7 +485,9 @@ export async function startMcpServer(): Promise<void> {
         lines.push(`Duration: ${result.durationMs}ms`);
         lines.push(``);
 
-        if ((result.parityScore ?? 0) >= 95) {
+        if (rawHtmlDetected) {
+          lines.push(`\u{1F6D1} DO NOT ITERATE ON RAW HTML. Go back and rewrite with semantic structure + flexbox/grid.`);
+        } else if ((result.parityScore ?? 0) >= 95) {
           lines.push(`Parity is above 95% — frame looks good. You can submit it or keep refining.`);
         } else if ((result.parityScore ?? 0) >= 85) {
           lines.push(`Parity is decent but can be improved. Check the diff image below for remaining issues.`);
