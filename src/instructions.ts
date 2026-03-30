@@ -294,6 +294,8 @@ build-guide.json auto-classifies frames based on names, but these are HEURISTICS
 
 **Key test:** Would a real user navigate directly to this URL? If yes → page. If no → overlay/component/state.
 
+**Overlay integration strategy:** Include the overlay's HTML in its parent page, hidden by default (e.g., \`display: none\` or \`visibility: hidden\` + \`opacity: 0\` with a transition). Add a trigger element (button, link, or icon) that could toggle the overlay with JavaScript. For this static build, having the HTML present but hidden is sufficient — the structure should be ready for JS activation.
+
 ### Step 3: Plan the website structure
 Write to session-log.md:
 - List of pages you will build (with which frames they use)
@@ -435,7 +437,7 @@ For each page in YOUR plan:
 2. **Laptop cleaned.html** (if available) = REFERENCE ONLY for responsive adjustments — extract ONLY the CSS differences vs. Desktop
 3. **Mobile cleaned.html** (if available) = REFERENCE ONLY for responsive adjustments — extract ONLY the CSS differences vs. Desktop
 4. Merge into **ONE responsive HTML file** with CSS media queries
-   - **If only desktop frames exist** (common): add your own responsive breakpoints at 768px and 375px using standard patterns (single-column on mobile, reduced font sizes, stacked grids). Use the desktop frame as the sole reference.
+   - **If only desktop frames exist** (common): add responsive breakpoints at 1024px (tablet landscape), 768px (tablet portrait), and 375px (mobile) using standard patterns: single-column on mobile, reduced font sizes, stacked grids, collapsed navigation. Use the desktop frame as the sole reference. These three breakpoints are the MINIMUM — adding responsive behavior is NOT "hallucinated UI," it is a production requirement.
 5. **Page title** = page name from build guide (e.g., "Home", "About") — NEVER the frame name (not "Home Page - Desktop")
 6. Link to \`css/styles.css\` for shared tokens
 7. Page-specific styles in \`<style>\` block in \`<head>\`
@@ -447,6 +449,7 @@ For each page in YOUR plan:
 - If the Figma shows "Home | Shop | About | Contact" in the nav, your output has exactly those 4 links — even if build-guide.json lists 9 pages.
 - Pages not shown in the Figma nav bar are still accessible via links WITHIN page content (e.g., a "View Cart" button), but they do NOT appear in the site navigation unless the Figma shows them there.
 - Use relative paths: \`index.html\`, \`pages/{slug}.html\`
+- **Mobile navigation:** When no mobile frame exists and the desktop nav has 4+ links, collapse the navigation into a hamburger menu pattern at mobile breakpoint (\`@media (max-width: 768px)\`). Include a \`<button class="nav-toggle">\` and hide the nav links by default on mobile. This is a standard responsive pattern — not "hallucinated UI."
 
 ### Step C5: Collect Images
 - Call \`collect_images\` — it automatically gathers images from ALL frames into \`website/images/\`, deduplicating by filename

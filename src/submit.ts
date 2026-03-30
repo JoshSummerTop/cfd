@@ -84,24 +84,40 @@ export async function uploadWebsite(
     throw new Error(`No files found in ${directory}`);
   }
 
-  // Read and base64-encode each file
+  // Read and base64-encode each file, tracking cumulative payload size
   const files: { path: string; content: string }[] = [];
   const htmlPages: { name: string; route: string }[] = [];
+  let totalPayloadBytes = 0;
+  const PAYLOAD_WARNING_BYTES = 400 * 1024 * 1024; // 400MB
+  const PAYLOAD_LIMIT_BYTES = 500 * 1024 * 1024; // 500MB (engine limit is 512MB)
 
   for (const fullPath of filePaths) {
     const relPath = relative(directory, fullPath).split("\\").join("/"); // normalize to forward slashes
     const data = await readFile(fullPath);
-    files.push({ path: relPath, content: data.toString("base64") });
+    const b64 = data.toString("base64");
+    totalPayloadBytes += b64.length;
+    files.push({ path: relPath, content: b64 });
 
-    // Track HTML pages for the pages array
-    // route must be the file path (e.g. "index.html", "pages/about.html") since the
-    // web app uses it directly as the iframe src path via websiteFileUrl(jobId, route)
     if (relPath.endsWith(".html")) {
       const name = relPath === "index.html"
         ? "Home"
         : relPath.replace(/\.html$/, "").replace(/^pages\//, "").replace(/(^|\/)(\w)/g, (_, sep, c) => sep + c.toUpperCase());
       htmlPages.push({ name, route: relPath });
     }
+  }
+
+  if (totalPayloadBytes > PAYLOAD_LIMIT_BYTES) {
+    const sizeMB = (totalPayloadBytes / (1024 * 1024)).toFixed(0);
+    throw new Error(
+      `Payload too large (${sizeMB}MB). Engine limit is 512MB. ` +
+      `Optimize images (compress PNGs, convert to WebP) before submitting.`
+    );
+  }
+
+  let sizeWarning = "";
+  if (totalPayloadBytes > PAYLOAD_WARNING_BYTES) {
+    const sizeMB = (totalPayloadBytes / (1024 * 1024)).toFixed(0);
+    sizeWarning = `\u{26A0}\u{FE0F} Large payload: ${sizeMB}MB (engine limit is 512MB). Consider optimizing images.\n`;
   }
 
   // Upload to engine
@@ -117,5 +133,5 @@ export async function uploadWebsite(
   }
 
   const data = await res.json();
-  return `Website uploaded: ${data.files} files, ${data.pages} pages. Build ID: ${data.buildId}. View it in the CodeFromDesign web app.`;
+  return `${sizeWarning}Website uploaded: ${data.files} files, ${data.pages} pages. Build ID: ${data.buildId}. View it in the CodeFromDesign web app.`;
 }

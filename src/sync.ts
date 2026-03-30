@@ -37,37 +37,63 @@ function parseFrameName(name: string): { pageName: string; breakpoint: string } 
   //   "About Page - Laptop"
   //   "Home - Desktop 1920"
   //   "Home / Desktop"
+  //   "01_Home_Desktop" (underscore with optional numeric prefix)
+
+  // First try standard separators (higher priority — more explicit)
   const separators = [" - ", " — ", " / "];
   for (const sep of separators) {
     const idx = name.lastIndexOf(sep);
     if (idx !== -1) {
-      let pagePart = name.slice(0, idx).trim();
-      const bpPart = name.slice(idx + sep.length).trim().toLowerCase();
-
-      // Strip trailing " Page" from page name
-      pagePart = pagePart.replace(/\s+Page$/i, "");
-
-      // Determine breakpoint from the text
-      let breakpoint: string;
-      if (bpPart.includes("desktop") || bpPart.includes("1920") || bpPart.includes("1440")) {
-        // If "1440" appears but not "desktop", treat as laptop
-        if (bpPart.includes("1440") && !bpPart.includes("desktop")) {
-          breakpoint = "laptop";
-        } else {
-          breakpoint = "desktop";
-        }
-      } else if (bpPart.includes("laptop") || bpPart.includes("tablet")) {
-        breakpoint = "laptop";
-      } else if (bpPart.includes("mobile") || bpPart.includes("phone") || bpPart.includes("375") || bpPart.includes("390")) {
-        breakpoint = "mobile";
-      } else {
-        breakpoint = "unknown";
-      }
-
-      return { pageName: pagePart, breakpoint };
+      // Standard separators always return (even with unknown breakpoint — width classification handles it)
+      return extractPageAndBreakpoint(name.slice(0, idx), name.slice(idx + sep.length), /* strict */ false)!;
     }
   }
+
+  // Try underscore separator — strip leading numeric prefix like "01_"
+  // Strict mode: only return if breakpoint was recognized (avoids false splits like "Cart_Sidebar")
+  const underscoreMatch = name.match(/^(?:\d+_)?(.+?)_([^_]+)$/);
+  if (underscoreMatch) {
+    const result = extractPageAndBreakpoint(underscoreMatch[1], underscoreMatch[2], /* strict */ true);
+    if (result) return result;
+  }
+
   return null;
+}
+
+function extractPageAndBreakpoint(rawPage: string, rawBp: string, strict: boolean): { pageName: string; breakpoint: string } | null {
+  let pagePart = rawPage.trim();
+  const bpPart = rawBp.trim().toLowerCase();
+
+  // Strip trailing " Page" from page name
+  pagePart = pagePart.replace(/\s+Page$/i, "");
+  // Also strip underscore-separated "Page" for underscore format
+  pagePart = pagePart.replace(/_Page$/i, "");
+  // Convert remaining underscores to spaces for display
+  pagePart = pagePart.replace(/_/g, " ");
+
+  // Determine breakpoint from the text
+  let breakpoint: string;
+  if (bpPart.includes("desktop") || bpPart.includes("1920") || bpPart.includes("1440")) {
+    if (bpPart.includes("1440") && !bpPart.includes("desktop")) {
+      breakpoint = "laptop";
+    } else {
+      breakpoint = "desktop";
+    }
+  } else if (bpPart.includes("laptop") || bpPart.includes("tablet")) {
+    breakpoint = "laptop";
+  } else if (bpPart.includes("mobile") || bpPart.includes("phone") || bpPart.includes("375") || bpPart.includes("390")) {
+    breakpoint = "mobile";
+  } else {
+    // For underscore format, unknown breakpoint likely means this wasn't actually
+    // a page_breakpoint pattern (e.g., "Cart_Sidebar" isn't a breakpoint split)
+    breakpoint = "unknown";
+  }
+
+  // In strict mode (underscore format), only return if breakpoint was recognized
+  // (avoids false splits like "Cart_Sidebar" being treated as page "Cart" + breakpoint "sidebar")
+  if (strict && breakpoint === "unknown") return null;
+
+  return { pageName: pagePart, breakpoint };
 }
 
 function slugify(name: string): string {
@@ -164,7 +190,12 @@ function generateBuildGuide(
   const frameClassifications: Record<string, { type: string; name: string; note?: string }> = {};
   const overlayKeywords = ["sidebar", "modal", "popup", "overlay", "drawer", "dropdown", "lightbox", "dialog", "panel", "flyout", "quick view", "quickview"];
   const componentKeywords = ["component", "header only", "footer only", "nav only", "widget"];
-  const stateKeywords = ["hover", "active", "state", "empty", "error", "loading", "selected", "disabled", "open", "closed"];
+  // State keywords: only unambiguous UI-state compound terms that wouldn't appear in page titles.
+  // Single words like "open", "active", "error" are TOO GENERIC — "Open Positions",
+  // "Active Listings", "Error 404" are legitimate page names. Phase A2 reasoning handles ambiguous cases.
+  const stateKeywords = ["hover state", "active state", "empty state", "error state",
+    "loading state", "selected state", "disabled state", "open state", "closed state",
+    " - hover", " - active", " - empty", " - loading", " - selected", " - disabled"];
 
   for (const frame of frames) {
     const nameLower = frame.name.toLowerCase();

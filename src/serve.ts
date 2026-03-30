@@ -9,6 +9,7 @@ import { engineFetch } from "./engine.js";
 import { syncJob, syncFrame, getWorkspacePath } from "./sync.js";
 import { submitFrame, buildWebsite, uploadWebsite } from "./submit.js";
 import { MCP_INSTRUCTIONS } from "./instructions.js";
+import { validateCleanedHtml, containsLoopbackUrls } from "./validate.js";
 
 // Recursively walk a directory — cross-platform, works on all Node 18+ versions
 async function walkWebsiteDir(dir: string): Promise<string[]> {
@@ -182,8 +183,28 @@ export async function startMcpServer(): Promise<void> {
     },
     async ({ jobId, frameIndex }) => {
       try {
+        // Validate cleaned.html before submitting (warn, don't block)
+        const wsPath = getWorkspacePath(jobId);
+        const cleanedPath = join(wsPath, "frames", String(frameIndex), "cleaned.html");
+        const lines: string[] = [];
+
+        if (existsSync(cleanedPath)) {
+          const html = await readFile(cleanedPath, "utf-8");
+          const validation = validateCleanedHtml(html);
+          if (validation.warnings.length > 0) {
+            lines.push(...validation.warnings);
+            lines.push(``);
+          }
+          if (validation.isRawHtml) {
+            lines.push(`\u{26A0}\u{FE0F} Submitting anyway, but this HTML will NOT produce a functional website.`);
+            lines.push(`Run compare first, then rewrite with semantic HTML before submitting.`);
+            lines.push(``);
+          }
+        }
+
         const result = await submitFrame(config, jobId, frameIndex);
-        return { content: [{ type: "text", text: result }] };
+        lines.push(result);
+        return { content: [{ type: "text", text: lines.join("\n") }] };
       } catch (err: any) {
         return { content: [{ type: "text", text: `Submit failed: ${err.message}` }] };
       }
@@ -227,20 +248,20 @@ export async function startMcpServer(): Promise<void> {
           return { content: [{ type: "text", text: `\u{1F6A8} VALIDATION FAILED: website/images/ directory is EMPTY. Call collect_images first to gather images from all frames (Phase C Step C5). Fix this before submitting.` }] };
         }
 
-        // Scan ALL HTML files for localhost references (report all violations at once)
+        // Scan ALL HTML files for localhost/loopback references (report all violations at once)
         const localhostViolations: string[] = [];
         const allFiles = await walkWebsiteDir(directory);
         for (const fullPath of allFiles) {
           const relPath = fullPath.slice(directory.length + 1).split("\\").join("/");
           if (relPath.endsWith(".html")) {
-            const content = await readFile(fullPath, "utf-8");
-            if (/https?:\/\/localhost/i.test(content)) {
+            const fileContent = await readFile(fullPath, "utf-8");
+            if (containsLoopbackUrls(fileContent)) {
               localhostViolations.push(relPath);
             }
           }
         }
         if (localhostViolations.length > 0) {
-          return { content: [{ type: "text", text: `\u{1F6A8} VALIDATION FAILED: ${localhostViolations.length} file(s) contain localhost URLs:\n${localhostViolations.map(f => `  - ${f}`).join("\n")}\n\nAll image/asset references must use relative paths (images/{hash}.png). Fix ALL files before submitting.` }] };
+          return { content: [{ type: "text", text: `\u{1F6A8} VALIDATION FAILED: ${localhostViolations.length} file(s) contain localhost/loopback URLs:\n${localhostViolations.map(f => `  - ${f}`).join("\n")}\n\nAll image/asset references must use relative paths (images/{hash}.png). Fix ALL files before submitting.` }] };
         }
 
         // Validate against build-guide.json (warn, don't block)
@@ -261,7 +282,9 @@ export async function startMcpServer(): Promise<void> {
             if (!existsSync(cssPath)) {
               submitWarnings.push(`\u{26A0}\u{FE0F} Missing css/styles.css — shared design system file expected`);
             }
-          } catch { /* skip validation if build-guide unreadable */ }
+          } catch {
+            submitWarnings.push(`\u{26A0}\u{FE0F} Could not read build-guide.json — structural validation skipped`);
+          }
         }
 
         const result = await uploadWebsite(config, jobId, directory);
@@ -301,7 +324,9 @@ export async function startMcpServer(): Promise<void> {
 
         let collected = 0;
         let duplicates = 0;
-        const seen = new Set<string>();
+        const errors: string[] = [];
+        const collisions: string[] = [];
+        const seen = new Map<string, { size: number; frame: string }>();
 
         for (const frameIdx of frameDirs) {
           const imgDir = join(framesDir, frameIdx, "images");
@@ -310,27 +335,54 @@ export async function startMcpServer(): Promise<void> {
           const files = await readdir(imgDir);
           for (const file of files) {
             if (file.startsWith(".")) continue;
-            if (seen.has(file)) {
-              duplicates++;
-              continue;
+            try {
+              const srcPath = join(imgDir, file);
+              const fileStat = await stat(srcPath);
+
+              if (seen.has(file)) {
+                const prev = seen.get(file)!;
+                if (prev.size !== fileStat.size) {
+                  collisions.push(`${file} (frame ${prev.frame}: ${prev.size}B vs frame ${frameIdx}: ${fileStat.size}B)`);
+                }
+                duplicates++;
+                continue;
+              }
+
+              seen.set(file, { size: fileStat.size, frame: frameIdx });
+              const data = await readFile(srcPath);
+              await writeFile(join(websiteImagesDir, file), data);
+              collected++;
+            } catch (fileErr: any) {
+              errors.push(`frame ${frameIdx}/${file}: ${fileErr.message}`);
             }
-            seen.add(file);
-            const data = await readFile(join(imgDir, file));
-            await writeFile(join(websiteImagesDir, file), data);
-            collected++;
           }
         }
+
+        const resultLines = [
+          `Collected images to ${websiteImagesDir}`,
+          `Files: ${collected} unique, ${duplicates} duplicates skipped`,
+          `Source frames: ${frameDirs.length}`,
+        ];
+
+        if (collisions.length > 0) {
+          resultLines.push(``);
+          resultLines.push(`\u{26A0}\u{FE0F} ${collisions.length} filename collision(s) with DIFFERENT sizes (first copy kept):`);
+          for (const c of collisions) resultLines.push(`  - ${c}`);
+        }
+
+        if (errors.length > 0) {
+          resultLines.push(``);
+          resultLines.push(`\u{26A0}\u{FE0F} ${errors.length} file(s) failed to copy:`);
+          for (const e of errors) resultLines.push(`  - ${e}`);
+        }
+
+        resultLines.push(``);
+        resultLines.push(`Images are ready. Reference them in your HTML as: images/{filename}`);
 
         return {
           content: [{
             type: "text",
-            text: [
-              `Collected images to ${websiteImagesDir}`,
-              `Files: ${collected} unique, ${duplicates} duplicates skipped`,
-              `Source frames: ${frameDirs.length}`,
-              ``,
-              `Images are ready. Reference them in your HTML as: images/{filename}`,
-            ].join("\n"),
+            text: resultLines.join("\n"),
           }],
         };
       } catch (err: any) {
@@ -364,14 +416,9 @@ export async function startMcpServer(): Promise<void> {
 
         const html = await readFile(cleanedPath, "utf-8");
 
-        // MCP-level image path validation (warn but don't block)
-        const mcpWarnings: string[] = [];
-        if (/(?:src|url)\s*[=(]\s*['"]?https?:\/\/localhost/i.test(html)) {
-          mcpWarnings.push(`\u{1F6A8} [localhost_url] cleaned.html contains localhost URLs in image/asset references. Use relative paths: images/{hash}.png`);
-        }
-        if (/(?:src|url)\s*[=(]\s*['"]?https?:\/\/engine\.codefromdesign/i.test(html)) {
-          mcpWarnings.push(`\u{1F6A8} [engine_url] cleaned.html contains engine API URLs in image/asset references. Use relative paths: images/{hash}.png`);
-        }
+        // MCP-level validation (localhost, engine URLs, raw HTML detection)
+        const sharedValidation = validateCleanedHtml(html);
+        const mcpWarnings = sharedValidation.warnings;
 
         // Send to engine for screenshot + diff
         const res = await engineFetch(config, `/api/jobs/${jobId}/frames/${frameIndex}/compare`, {
@@ -394,31 +441,32 @@ export async function startMcpServer(): Promise<void> {
         // Check if engine flagged excessive absolute positioning (raw Figma HTML).
         // This is the #1 failure mode: Claude submits raw HTML unchanged, gets 99%
         // parity, and stops — producing a non-functional website.
-        let rawHtmlDetected = false;
+        // Combine engine-side and local raw HTML detection
+        let rawHtmlDetected = sharedValidation.isRawHtml;
         const absWarning = result.warnings?.find((w: any) => w.code === "absolute_position");
         if (absWarning) {
-          // Extract count from message like "...on 289 elements..."
           const countMatch = absWarning.message?.match(/(\d+)\s+elements/);
           const absCount = countMatch ? parseInt(countMatch[1], 10) : 0;
-          // Also check locally — raw Figma HTML has position:absolute with pixel top/left
-          // (the Figma coordinate pattern). Legitimate cleaned HTML might have some
-          // position:absolute for dropdowns/tooltips but NOT with hundreds of px offsets.
-          // Match position:absolute + px top/left within the SAME style attribute (not across elements)
-          const absWithPxCoords = (html.match(/style="[^"]*position\s*:\s*absolute[^"]*(?:top|left)\s*:\s*\d+px/gi) || []).length;
-          if (absCount > 50 || absWithPxCoords > 20) {
-            rawHtmlDetected = true;
-            lines.push(`\u{1F6D1} RAW HTML DETECTED: Your HTML has ${absCount} absolute-positioned elements.`);
-            lines.push(`This is raw Figma output, NOT cleaned HTML. You MUST convert to semantic HTML`);
-            lines.push(`with flexbox/grid before the parity score becomes meaningful.`);
-            lines.push(``);
-            lines.push(`What to do:`);
-            lines.push(`1. Read figma-screenshot.png and ai-ready.html`);
-            lines.push(`2. REWRITE the HTML with <header>, <main>, <section>, <footer>`);
-            lines.push(`3. Use flexbox/grid for layout — NO position:absolute for page structure`);
-            lines.push(`4. Expect 65-85% parity on first clean — this is NORMAL`);
-            lines.push(`5. Then iterate to 95%+ from the cleaned version`);
-            lines.push(``);
-          }
+          if (absCount > 50) rawHtmlDetected = true;
+        }
+        if (rawHtmlDetected) {
+          // Remove any raw-HTML warning from mcpWarnings (avoid duplication) and show detailed guidance
+          const filteredWarnings = mcpWarnings.filter((w) => !w.includes("RAW HTML DETECTED"));
+          mcpWarnings.length = 0;
+          mcpWarnings.push(...filteredWarnings);
+
+          const absCount = absWarning ? (absWarning.message?.match(/(\d+)\s+elements/)?.[1] ?? "many") : "many";
+          lines.push(`\u{1F6D1} RAW HTML DETECTED: Your HTML has ${absCount} absolute-positioned elements.`);
+          lines.push(`This is raw Figma output, NOT cleaned HTML. You MUST convert to semantic HTML`);
+          lines.push(`with flexbox/grid before the parity score becomes meaningful.`);
+          lines.push(``);
+          lines.push(`What to do:`);
+          lines.push(`1. Read figma-screenshot.png and ai-ready.html`);
+          lines.push(`2. REWRITE the HTML with <header>, <main>, <section>, <footer>`);
+          lines.push(`3. Use flexbox/grid for layout — NO position:absolute for page structure`);
+          lines.push(`4. Expect 65-85% parity on first clean — this is NORMAL`);
+          lines.push(`5. Then iterate to 95%+ from the cleaned version`);
+          lines.push(``);
         }
 
         // ── FIRST-ITERATION SUSPICION CHECK ─────────────────────────────
@@ -459,12 +507,18 @@ export async function startMcpServer(): Promise<void> {
               if (Array.isArray(logEntries) && logEntries.length > 0) {
                 const prevParity = logEntries[logEntries.length - 1]?.parity ?? 0;
                 const currentParity = result.parityScore ?? 0;
-                if (currentParity < prevParity - 1) {
+                if (currentParity < prevParity - 3) {
                   lines.push(`\u{1F6A8} PARITY REGRESSION: Previous iteration was ${prevParity.toFixed(1)}%. This iteration scored ${currentParity.toFixed(1)}%. Your latest changes made things WORSE.`);
                   lines.push(``);
                 }
+              } else {
+                lines.push(`\u{26A0}\u{FE0F} compare-log.json has unexpected format — regression detection skipped for this frame.`);
+                lines.push(``);
               }
-            } catch { /* ignore */ }
+            } catch {
+              lines.push(`\u{26A0}\u{FE0F} compare-log.json is corrupted — regression detection unavailable for this frame.`);
+              lines.push(``);
+            }
           }
         }
 
@@ -526,8 +580,12 @@ export async function startMcpServer(): Promise<void> {
                 data: imgData.toString("base64"),
                 mimeType: "image/png",
               });
+            } else {
+              content.push({ type: "text", text: `${img.label} [Image unavailable — engine returned ${imgRes.status}]` });
             }
-          } catch { /* non-critical */ }
+          } catch (imgErr: any) {
+            content.push({ type: "text", text: `${img.label} [Image unavailable — ${imgErr.message || "fetch failed"}]` });
+          }
         }
 
         // Update local compare-log.json from engine
