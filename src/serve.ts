@@ -10,7 +10,6 @@ import { syncJob, syncFrame, getWorkspacePath, getFrameCleanStatus } from "./syn
 import { submitFrame, buildWebsite, uploadWebsite } from "./submit.js";
 import { HANDSHAKE_INSTRUCTIONS, CLEAN_FRAMES_INSTRUCTIONS, BUILD_WEBSITE_INSTRUCTIONS } from "./instructions/index.js";
 import { validateForSubmission, containsLoopbackUrls } from "./validate.js";
-import { transformFrame } from "./transform.js";
 
 // Recursively walk a directory — cross-platform, works on all Node 18+ versions
 async function walkWebsiteDir(dir: string): Promise<string[]> {
@@ -262,55 +261,6 @@ export async function startMcpServer(): Promise<void> {
         return { content: [{ type: "text", text: lines.join("\n") }] };
       } catch (err: any) {
         return { content: [{ type: "text", text: `Submit failed: ${err.message}` }] };
-      }
-    }
-  );
-
-  // --- Tool: transform ---
-  server.tool(
-    "transform",
-    "Deterministic HTML builder — transforms ai-ready.html into a first-pass cleaned.html using manifest.json layout data, image-map.json, and svg-map.json. Runs in <1 second. Call this FIRST, then review the output, validate, compare, and fine-tune.",
-    {
-      jobId: z.string().describe("The job ID"),
-      frameIndex: z.number().describe("The frame index (0-based)"),
-    },
-    async ({ jobId, frameIndex }) => {
-      try {
-        const result = await transformFrame(jobId, frameIndex);
-
-        // Write the transformed HTML
-        const wsPath = getWorkspacePath(jobId);
-        const cleanedPath = join(wsPath, "frames", String(frameIndex), "cleaned.html");
-        await writeFile(cleanedPath, result.html, "utf-8");
-
-        const lines = [
-          `Transform complete — cleaned.html written.`,
-          ``,
-          `Stats:`,
-          `  Sections wrapped in semantic tags: ${result.stats.sectionsWrapped}`,
-          `  AutoLayout flex applied: ${result.stats.autoLayoutApplied}`,
-          `  Images resolved: ${result.stats.imagesResolved}`,
-          `  SVGs resolved: ${result.stats.svgsResolved}`,
-          `  Elements still absolute-positioned: ${result.stats.nodesLeftAbsolute}`,
-        ];
-
-        if (result.warnings.length > 0) {
-          lines.push(``, `Warnings:`, ...result.warnings.map(w => `  ${w}`));
-        }
-
-        lines.push(
-          ``,
-          `Next steps:`,
-          `1. Review cleaned.html — check semantic structure and layout`,
-          `2. Call validate to check structural quality`,
-          `3. Call compare to measure parity and get diff image`,
-          `4. Fix any issues from the diff`,
-          `5. Call submit_cleaned_frame when ready`,
-        );
-
-        return { content: [{ type: "text", text: lines.join("\n") }] };
-      } catch (err: any) {
-        return { content: [{ type: "text", text: `Transform failed: ${err.message}` }] };
       }
     }
   );

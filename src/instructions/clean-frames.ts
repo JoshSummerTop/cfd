@@ -44,19 +44,38 @@ What the design should look like. When in doubt, match this.
 
 ### Authority: figma-screenshot.png > manifest.json > ai-ready.html
 
-## The Workflow
+## The Transformation Workflow
 
-1. **STUDY** the Figma screenshot — understand what you're building.
-2. **TRANSFORM** — call \`transform\` to generate first-pass \`cleaned.html\` automatically (<1 second). This tool:
-   - Wraps sections in semantic tags using manifest.json roles
-   - Applies flex layout from manifest.json autoLayout data
-   - Resolves images via image-map.json
-   - Resolves SVGs via svg-map.json
-   - Fixes viewport and wrapper dimensions
-3. **REVIEW** the generated cleaned.html — check structure, fix any layout issues the tool missed.
-   - Elements without autoLayout data keep absolute positioning — convert overlays manually if needed
-   - \`position:absolute\` within \`position:relative\` containers is FINE for overlays (badges, captions, hover states)
-4. **VALIDATE** — call \`validate\` to check structural quality. Fix errors.
+**You are transforming ai-ready.html, not writing from scratch.**
+
+1. **STUDY** the Figma screenshot — count every section top-to-bottom.
+2. **READ** \`manifest.json\` — note section roles, flex properties from \`autoLayout\`.
+3. **TRANSFORM** \`ai-ready.html\` into \`cleaned.html\`:
+
+   **What to change (layout):**
+   - Replace \`position:absolute\` page layout with flexbox/grid (use \`autoLayout\` values from manifest)
+   - Move inline \`style=""\` attributes to a \`<style>\` block with BEM classes
+   - Wrap content in semantic elements (\`<header>\`, \`<main>\`, \`<section>\`, \`<footer>\`) based on manifest \`sections[]\` roles
+   - Replace \`width:1440px\` on containers with \`max-width\`
+   - Add \`:root\` CSS custom properties for colors, fonts, spacing
+   - Resolve \`data-image-ref\` → \`images/{hash}.png\` via \`image-map.json\`
+   - Resolve \`data-svg-id\` → inline SVG via \`svg-map.json\`
+
+   **What to KEEP (content — do not rewrite):**
+   - All text content verbatim — headings, paragraphs, labels, links
+   - All colors, font sizes, font weights, font families
+   - All spacing values (margins, paddings, gaps)
+   - All images and their dimensions
+   - All SVG icons
+   - Element order and hierarchy
+
+   **position:absolute is fine for overlays:**
+   - Badges on product card images (discount/new labels)
+   - Content cards overlaid on hero banners
+   - Hover overlays, floating buttons, image captions
+   - Use \`position:absolute\` within a \`position:relative\` container — this is standard production CSS
+
+4. **VALIDATE** — call \`validate\` to instantly check structural quality. Fix errors before proceeding.
 5. **COMPARE** — call \`compare\` for parity score + diff image.
 6. **READ** diff image + \`issue-diff.json\` — identify fixable vs unfixable issues.
 7. **FIX** fixable issues only.
