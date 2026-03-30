@@ -14,7 +14,7 @@ export async function startMcpServer(): Promise<void> {
   const config = await loadConfig();
 
   const server = new McpServer(
-    { name: "cfd", version: "0.3.0" },
+    { name: "cfd", version: "0.4.2" },
     { instructions: MCP_INSTRUCTIONS },
   );
 
@@ -98,7 +98,7 @@ export async function startMcpServer(): Promise<void> {
   // --- Tool: submit_cleaned_frame ---
   server.tool(
     "submit_cleaned_frame",
-    "Submit cleaned HTML for a frame. Reads from workspace frames/{idx}/cleaned.html and uploads to the engine.",
+    "Submit cleaned HTML for a frame. Reads cleaned.html and uploads to engine. WARNING: cleaned.html must NOT contain localhost URLs or http:// image paths — only relative paths like images/{hash}.png.",
     {
       jobId: z.string().describe("The job ID"),
       frameIndex: z.number().describe("The frame index (0-based)"),
@@ -140,6 +140,27 @@ export async function startMcpServer(): Promise<void> {
     },
     async ({ jobId, directory }) => {
       try {
+        // Validate images directory
+        const imagesDir = join(directory, "images");
+        if (!existsSync(imagesDir)) {
+          return { content: [{ type: "text", text: `\u{1F6A8} VALIDATION FAILED: No images/ directory found in the website. Copy images from frames/{idx}/images/ to website/images/ (Phase C Step C5). Fix this before submitting.` }] };
+        }
+        const imageFiles = (await readdir(imagesDir)).filter((f) => !f.startsWith("."));
+        if (imageFiles.length === 0) {
+          return { content: [{ type: "text", text: `\u{1F6A8} VALIDATION FAILED: website/images/ directory is EMPTY. Copy images from frames/{idx}/images/ to website/images/ (Phase C Step C5). Fix this before submitting.` }] };
+        }
+
+        // Scan HTML files for localhost references
+        const htmlFiles = (await readdir(directory, { recursive: true })) as string[];
+        for (const f of htmlFiles) {
+          if (typeof f === "string" && f.endsWith(".html")) {
+            const content = await readFile(join(directory, f), "utf-8");
+            if (/https?:\/\/localhost/i.test(content)) {
+              return { content: [{ type: "text", text: `\u{1F6A8} VALIDATION FAILED: ${f} contains localhost URLs. All image/asset references must use relative paths (images/{hash}.png). Fix this before submitting.` }] };
+            }
+          }
+        }
+
         const result = await uploadWebsite(config, jobId, directory);
         return { content: [{ type: "text", text: result }] };
       } catch (err: any) {
@@ -151,7 +172,7 @@ export async function startMcpServer(): Promise<void> {
   // --- Tool: compare ---
   server.tool(
     "compare",
-    "Screenshot cleaned.html and diff against the Figma reference. Returns parity score and category breakdown. Call sync after to download updated diff images.",
+    "Screenshot cleaned.html and diff against the Figma reference. Returns parity score and category breakdown. Call sync after to download updated diff images. REMINDER: max 2 background agents at a time.",
     {
       jobId: z.string().describe("The job ID"),
       frameIndex: z.number().describe("The frame index (0-based)"),
@@ -173,6 +194,15 @@ export async function startMcpServer(): Promise<void> {
 
         const html = await readFile(cleanedPath, "utf-8");
 
+        // MCP-level image path validation (warn but don't block)
+        const mcpWarnings: string[] = [];
+        if (/(?:src|url)\s*[=(]\s*['"]?https?:\/\/localhost/i.test(html)) {
+          mcpWarnings.push(`\u{1F6A8} [localhost_url] cleaned.html contains localhost URLs in image/asset references. Use relative paths: images/{hash}.png`);
+        }
+        if (/(?:src|url)\s*[=(]\s*['"]?https?:\/\/engine\.codefromdesign/i.test(html)) {
+          mcpWarnings.push(`\u{1F6A8} [engine_url] cleaned.html contains engine API URLs in image/asset references. Use relative paths: images/{hash}.png`);
+        }
+
         // Send to engine for screenshot + diff
         const res = await engineFetch(config, `/api/jobs/${jobId}/frames/${frameIndex}/compare`, {
           method: "POST",
@@ -187,11 +217,42 @@ export async function startMcpServer(): Promise<void> {
 
         const result = await res.json();
 
-        const lines = [
-          `Frame ${frameIndex} comparison complete (iteration ${result.iterationCount})`,
-          ``,
-          `Parity: ${result.parityScore?.toFixed(1) ?? "n/a"}%`,
-        ];
+        const lines: string[] = [];
+
+        // Surface engine validation warnings first (most important)
+        if (result.warnings?.length) {
+          for (const w of result.warnings) {
+            const icon = w.severity === 'critical' ? '\u{1F6A8}' : '\u{26A0}\u{FE0F}';
+            lines.push(`${icon} [${w.code}] ${w.message}`);
+            if (w.context) lines.push(`   Context: ${w.context}`);
+          }
+          lines.push(``);
+        }
+
+        // Surface MCP-level warnings
+        if (mcpWarnings.length > 0) {
+          lines.push(...mcpWarnings, ``);
+        }
+
+        // MCP-level parity regression check (backup for engine-level check)
+        const metadataPath = join(wsPath, "frames", String(frameIndex), "metadata.json");
+        let originalParity: number | null = null;
+        if (existsSync(metadataPath)) {
+          try {
+            const meta = JSON.parse(await readFile(metadataPath, "utf-8"));
+            originalParity = meta.parityScore ?? null;
+          } catch { /* ignore */ }
+        }
+
+        const currentParity = result.parityScore ?? 0;
+        if (originalParity !== null && currentParity < originalParity - 1) {
+          lines.push(`\u{1F6A8} PARITY REGRESSION: Original rendered.html was ${originalParity.toFixed(1)}%. Your cleaned.html scored ${currentParity.toFixed(1)}%. Your changes made things WORSE. DO NOT SUBMIT.`);
+          lines.push(``);
+        }
+
+        lines.push(`Frame ${frameIndex} comparison complete (iteration ${result.iterationCount})`);
+        lines.push(``);
+        lines.push(`Parity: ${result.parityScore?.toFixed(1) ?? "n/a"}%`);
 
         if (result.nonFontParity != null) {
           lines.push(`Non-font parity: ${result.nonFontParity.toFixed(1)}%`);
@@ -225,7 +286,7 @@ export async function startMcpServer(): Promise<void> {
   // --- Tool: get_snips ---
   server.tool(
     "get_snips",
-    "Get visual snips (user-reported problem areas) from the CodeFromDesign web app. Returns cropped screenshots with metadata showing exactly what the user flagged. Check this when starting work or when the user pastes snip context.",
+    "Retrieve user-reported visual issues (snips). ONLY call this when the user pastes snip metadata into the conversation. Never call proactively or as a first action.",
     {
       jobId: z.string().describe("The job ID"),
     },

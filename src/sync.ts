@@ -160,12 +160,13 @@ function generateBuildGuide(
     };
   }
 
-  // Navigation = page names in order
+  // Navigation = page names in order (for file linking, NOT for rendering as a visible nav bar)
   const navigation = pages.map((p) => p.name);
 
   return {
     pages,
     navigation,
+    navigationNote: "This array lists ALL pages for inter-page LINKING (href targets). It does NOT define the visible nav bar. The visible nav bar must match the Figma screenshot exactly — most designs show only 3-5 main links, not every page.",
     breakpoints,
     outputStructure: {
       root: "website/",
