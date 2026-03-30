@@ -1,6 +1,6 @@
 import { readFile, readdir, stat } from "node:fs/promises";
 import { existsSync } from "node:fs";
-import { join, relative, posix } from "node:path";
+import { join, relative } from "node:path";
 import { getWorkspacePath } from "./sync.js";
 import { type CfdConfig } from "./config.js";
 import { engineFetch } from "./engine.js";

@@ -31,7 +31,7 @@ export async function startMcpServer(): Promise<void> {
   const config = await loadConfig();
 
   const server = new McpServer(
-    { name: "cfd", version: "0.6.0" },
+    { name: "cfd", version: "0.7.1" },
     { instructions: HANDSHAKE_INSTRUCTIONS },
   );
 
@@ -120,12 +120,11 @@ export async function startMcpServer(): Promise<void> {
               ),
               ``,
               `Each frame directory contains:`,
-              `  metadata.json         -- dimensions, parity scores, issues`,
-              `  rendered.html         -- raw engine HTML output`,
+              `  ai-ready.html         -- YOUR PRIMARY INPUT (DOM with data-image-ref/data-svg-id placeholders)`,
+              `  manifest.json         -- section roles, flex properties, component detection`,
+              `  issue-diff.json       -- per-node parity breakdown (fixable vs unfixable)`,
               `  figma-screenshot.png  -- reference (what it should look like)`,
-              `  screenshot.png        -- what the HTML currently renders as`,
               `  diff.png              -- pixel diff overlay`,
-              `  manifest.json         -- component/section metadata (if available)`,
               ``,
               `Read build-guide.json for the website assembly plan (page-to-frame mapping, breakpoints, output structure).`,
               `Read job.json for an overview of all frames and parity scores.`,
