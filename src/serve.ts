@@ -400,7 +400,11 @@ export async function startMcpServer(): Promise<void> {
           // Extract count from message like "...on 289 elements..."
           const countMatch = absWarning.message?.match(/(\d+)\s+elements/);
           const absCount = countMatch ? parseInt(countMatch[1], 10) : 0;
-          if (absCount > 20) {
+          // Also check locally — raw Figma HTML has position:absolute with pixel top/left
+          // (the Figma coordinate pattern). Legitimate cleaned HTML might have some
+          // position:absolute for dropdowns/tooltips but NOT with hundreds of px offsets.
+          const absWithPxCoords = (html.match(/position\s*:\s*absolute[^}]*(?:top|left)\s*:\s*\d+px/gi) || []).length;
+          if (absCount > 50 || absWithPxCoords > 20) {
             rawHtmlDetected = true;
             lines.push(`\u{1F6D1} RAW HTML DETECTED: Your HTML has ${absCount} absolute-positioned elements.`);
             lines.push(`This is raw Figma output, NOT cleaned HTML. You MUST convert to semantic HTML`);

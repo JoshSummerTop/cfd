@@ -426,7 +426,11 @@ This structure is NOT optional. \`submit_website\` expects it. The web app rende
 
 ### Step C3: Build Each Page (max 2 background agents at a time)
 
-For each page in build-guide.json:
+**Build ONLY the pages you identified in your Phase A2 website plan** — NOT every entry in build-guide.json. Frames classified as overlays, components, or states are NOT standalone pages. If your A2 plan says "Cart Sidebar is an overlay on the Shop page," then:
+- Do NOT create \`pages/cart-sidebar.html\`
+- Instead, integrate the Cart Sidebar overlay design into the Shop page HTML
+
+For each page in YOUR plan:
 1. **Desktop cleaned.html** = base structure, all content, default CSS
 2. **Laptop cleaned.html** (if available) = REFERENCE ONLY for responsive adjustments — extract ONLY the CSS differences vs. Desktop
 3. **Mobile cleaned.html** (if available) = REFERENCE ONLY for responsive adjustments — extract ONLY the CSS differences vs. Desktop

@@ -192,8 +192,30 @@ function generateBuildGuide(
     };
   }
 
+  // Separate pages from non-pages based on classification
+  const pageFrameIndices = new Set(
+    Object.entries(frameClassifications)
+      .filter(([, c]) => c.type === "page")
+      .map(([idx]) => parseInt(idx, 10))
+  );
+
+  // Filter pages array to only include frames classified as pages
+  const pageEntries = pages.filter((p) => {
+    // Check if any frame in this page group is classified as a page
+    return Object.values(p.frames).some((f: any) => pageFrameIndices.has(f.index));
+  });
+
+  // Collect non-page frames into overlays/components/states
+  const nonPageFrames = Object.entries(frameClassifications)
+    .filter(([, c]) => c.type !== "page")
+    .map(([idx, c]) => ({ index: parseInt(idx, 10), ...c }));
+
   return {
-    pages,
+    pages: pageEntries,
+    nonPageFrames: nonPageFrames.length > 0 ? nonPageFrames : undefined,
+    nonPageNote: nonPageFrames.length > 0
+      ? "These frames are auto-classified as overlays/components/states — NOT standalone pages. Review in Phase A2 and integrate into parent pages during assembly."
+      : undefined,
     navigation,
     navigationNote: "This array lists ALL pages for inter-page LINKING (href targets). It does NOT define the visible nav bar. The visible nav bar must match the Figma screenshot exactly — most designs show only 3-5 main links, not every page.",
     frameClassifications,
