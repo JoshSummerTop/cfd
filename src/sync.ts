@@ -264,29 +264,9 @@ function generateBuildGuide(
 // Log structure creation
 // ---------------------------------------------------------------------------
 
-async function createLogStructure(wsPath: string, jobMeta: any): Promise<void> {
+async function createLogStructure(wsPath: string): Promise<void> {
   const logsDir = join(wsPath, "logs");
-  const framesLogDir = join(logsDir, "frames");
-
   await mkdir(logsDir, { recursive: true });
-  await mkdir(framesLogDir, { recursive: true });
-
-  // Only write initial session-log.md if it doesn't exist yet
-  const sessionLogPath = join(logsDir, "session-log.md");
-  if (!existsSync(sessionLogPath)) {
-    const frameCount = jobMeta.frames?.length ?? 0;
-    const initialLog = [
-      `# Session Log — Job ${jobMeta.id}`,
-      ``,
-      `**Figma URL:** ${jobMeta.figmaUrl || "n/a"}`,
-      `**Frames:** ${frameCount}`,
-      `**Created:** ${jobMeta.createdAt || "n/a"}`,
-      ``,
-      `---`,
-      ``,
-    ].join("\n");
-    await writeFile(sessionLogPath, initialLog);
-  }
 }
 
 // ---------------------------------------------------------------------------
@@ -303,7 +283,7 @@ export interface FrameSummary {
   warnings?: string[];
 }
 
-const CRITICAL_ARTIFACTS = new Set(["ai-ready.html", "figma-screenshot.png", "rendered.html"]);
+const CRITICAL_ARTIFACTS = new Set(["ai-ready.html", "figma-screenshot.png"]);
 
 async function syncFrameArtifacts(
   config: CfdConfig,
@@ -314,32 +294,17 @@ async function syncFrameArtifacts(
 ): Promise<FrameSummary> {
   await mkdir(frameDir, { recursive: true });
 
-  // Write frame metadata (trim name — Figma sometimes adds trailing whitespace)
   const frameName = (frame.name || `Frame ${frameIndex}`).trim();
-  const frameMeta = {
-    index: frameIndex,
-    name: frameName,
-    page: frame.page || "Page 1",
-    width: frame.width,
-    height: frame.height,
-    parityScore: frame.parityScore,
-    parityNonFont: frame.parityNonFont,
-    parityBreakdown: frame.parityBreakdown,
-    correctionIterations: frame.correctionIterations,
-    issues: frame.issues,
-  };
-  await writeFile(join(frameDir, "metadata.json"), JSON.stringify(frameMeta, null, 2));
 
   // Download artifacts in parallel
+  // Note: rendered.html, screenshot.png, metadata.json, cleaned-screenshot.png, cleaned-diff.png
+  // are NOT downloaded — ai-ready.html is the primary input, and cleaned artifacts are
+  // served directly from the engine to the web app canvas.
   const artifacts = [
-    { name: "rendered.html", endpoint: `/api/jobs/${jobId}/frames/${frameIndex}/html` },
+    { name: "ai-ready.html", endpoint: `/api/jobs/${jobId}/frames/${frameIndex}/ai-ready-html` },
     { name: "figma-screenshot.png", endpoint: `/api/jobs/${jobId}/frames/${frameIndex}/figma-screenshot` },
-    { name: "screenshot.png", endpoint: `/api/jobs/${jobId}/frames/${frameIndex}/screenshot` },
     { name: "diff.png", endpoint: `/api/jobs/${jobId}/frames/${frameIndex}/diff` },
     { name: "manifest.json", endpoint: `/api/jobs/${jobId}/frames/${frameIndex}/manifest` },
-    { name: "ai-ready.html", endpoint: `/api/jobs/${jobId}/frames/${frameIndex}/ai-ready-html` },
-    { name: "cleaned-screenshot.png", endpoint: `/api/jobs/${jobId}/frames/${frameIndex}/cleaned-screenshot` },
-    { name: "cleaned-diff.png", endpoint: `/api/jobs/${jobId}/frames/${frameIndex}/cleaned-diff` },
     { name: "compare-log.json", endpoint: `/api/jobs/${jobId}/frames/${frameIndex}/artifact/compare-log.json` },
   ];
 
@@ -541,7 +506,7 @@ export async function syncJob(
   console.error(`[cfd] generated build-guide.json`);
 
   // Create log structure for session tracking
-  await createLogStructure(wsPath, jobMeta);
+  await createLogStructure(wsPath);
   console.error(`[cfd] created logs/ directory structure`);
 
   console.error(`[cfd] sync complete: ${frames.length} frames -> ${wsPath}`);

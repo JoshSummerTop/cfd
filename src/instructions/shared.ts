@@ -9,23 +9,18 @@ export const WORKSPACE_STRUCTURE = `## Workspace Structure
 ~/.codefromdesign/workspace/{jobId}/
   job.json                          — job metadata, frame list, parity scores
   build-guide.json                  — page-to-frame mapping, breakpoints, output structure
-  logs/                             — session and frame logs
   frames/
     0/
-      metadata.json                 — frame dimensions, parity, issue breakdown
-      rendered.html                 — raw engine HTML (absolute positioning, inline styles)
-      ai-ready.html                 — cleaned HTML with layout hints applied
+      ai-ready.html                 — YOUR PRIMARY INPUT — DOM structure with data-image-ref and data-svg-id placeholders
+      manifest.json                 — section roles, flex properties, component detection — READ THIS FIRST
+      issue-diff.json               — per-node parity breakdown — fixable vs unfixable diffs
       figma-screenshot.png          — THE REFERENCE — what the design looks like
-      screenshot.png                — what the current HTML renders as
       diff.png                      — color-coded pixel diff
-      manifest.json                 — layout metadata (flexbox hints, section roles, design tokens)
       svg-map.json                  — node ID → inline SVG markup for vectors/icons
       image-map.json                — reference ID → filename for images
       images/                       — actual image files (hash-named PNGs)
+      compare-log.json              — iteration history (populated after compare)
       cleaned.html                  — YOUR OUTPUT — production-grade code
-      cleaned-screenshot.png        — screenshot of your output (after compare)
-      cleaned-diff.png              — diff of your output vs Figma (after compare)
-      compare-log.json              — iteration history
       .submitted                    — marker file (present = frame has been submitted)
     1/
       ...
