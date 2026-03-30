@@ -346,8 +346,11 @@ export async function syncJob(
         await mkdir(imgDir, { recursive: true });
 
         await Promise.allSettled(
-          Object.values(imageMap).map(async (filename) => {
+          Object.entries(imageMap).map(async ([_ref, value]) => {
             try {
+              // image-map.json values may be full URLs (http://localhost:8082/api/.../images/hash.png)
+              // or relative paths. Extract just the filename for both API fetch and local storage.
+              const filename = value.split("/").pop() || value;
               const imgRes = await engineFetch(config, `/api/jobs/${jobId}/frames/${i}/images/${filename}`);
               if (imgRes.ok) {
                 const data = Buffer.from(await imgRes.arrayBuffer());
