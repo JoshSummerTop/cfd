@@ -344,33 +344,61 @@ export async function transformFrame(
   const frameRoot3 = body3.querySelector("div[data-node-id]");
   if (frameRoot3) {
     const rootStyle = parseInlineStyle(frameRoot3.getAttribute("style") || "");
-    // Replace fixed width with max-width
     if (rootStyle.width) {
       rootStyle["max-width"] = rootStyle.width;
       rootStyle.width = "100%";
     }
     rootStyle["margin"] = "0 auto";
-    // Remove fixed height — let content determine height
     delete rootStyle.height;
-    // Keep position:relative for overlay children
     rootStyle.position = "relative";
     frameRoot3.setAttribute("style", serializeStyle(rootStyle));
   }
 
-  // --- Step 6: Fix viewport meta ---
+  // --- Step 6: Extract inline styles to <style> block ---
+  let classCounter = 0;
+  const cssRules: string[] = [];
+
+  for (const el of doc3.querySelectorAll("*")) {
+    const inlineStyle = el.getAttribute("style");
+    if (!inlineStyle || inlineStyle.length < 10) continue;
+
+    // Generate a class name
+    const tag = el.tagName?.toLowerCase() || "el";
+    const existingClass = el.getAttribute("class") || "";
+    const className = existingClass || `${tag}-${classCounter++}`;
+
+    // Parse the inline style and move to CSS rule
+    cssRules.push(`.${className.replace(/\s+/g, ".")} { ${inlineStyle} }`);
+
+    if (!existingClass) {
+      el.setAttribute("class", className);
+    }
+    el.removeAttribute("style");
+    stats.stylesExtracted++;
+  }
+
+  // Insert extracted CSS into the existing <style> block
+  if (cssRules.length > 0) {
+    const existingStyle = doc3.querySelector("style");
+    if (existingStyle) {
+      const currentCss = existingStyle.innerHTML;
+      existingStyle.set_content(currentCss + "\n\n/* Extracted from inline styles */\n" + cssRules.join("\n"));
+    }
+  }
+
+  // --- Step 7: Fix viewport meta ---
   const viewportMeta = doc3.querySelector('meta[name="viewport"]');
   if (viewportMeta) {
     viewportMeta.setAttribute("content", "width=device-width, initial-scale=1.0");
   }
 
-  // --- Step 7: Count remaining absolute-positioned elements ---
-  const absElements = doc3.querySelectorAll("*").filter((el) => {
-    const style = el.getAttribute("style") || "";
-    return style.includes("position:absolute") || style.includes("position: absolute");
-  });
-  stats.nodesLeftAbsolute = absElements.length;
+  // --- Step 8: Count remaining absolute-positioned elements ---
+  // Check CSS rules since styles are now in the <style> block
+  const allCss = doc3.querySelector("style")?.innerHTML || "";
+  const absInCss = (allCss.match(/position\s*:\s*absolute/gi) || []).length;
+  stats.nodesLeftAbsolute = absInCss;
 
-  // --- Step 8: Clean up data attributes ---
+  // --- Step 9: Clean up data attributes ---
   for (const el of doc3.querySelectorAll("*")) {
     el.removeAttribute("data-node-id");
     el.removeAttribute("data-image-ref");
@@ -379,7 +407,7 @@ export async function transformFrame(
     el.removeAttribute("data-fill-overlay");
   }
 
-  // --- Step 9: Update title ---
+  // --- Step 10: Update title ---
   const title = doc3.querySelector("title");
   if (title && manifest?.frame?.name) {
     title.set_content(manifest.frame.name);
