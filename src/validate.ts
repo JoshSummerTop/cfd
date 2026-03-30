@@ -195,13 +195,8 @@ export function validateForSubmission(html: string): SubmissionValidationResult 
     );
   }
 
-  // --- Warning: No responsive media queries ---
-  if (!MEDIA_QUERY.test(html)) {
-    warnings.push(
-      `No responsive media queries found. ` +
-      `Production code should include breakpoints for mobile/tablet/desktop.`
-    );
-  }
+  // Note: @media queries are NOT checked here — responsiveness is a Job 2 (website build)
+  // concern, not a frame cleaning concern. Each frame targets one viewport.
 
   // --- Warning: No BEM class naming ---
   if (!BEM_CLASS.test(html)) {

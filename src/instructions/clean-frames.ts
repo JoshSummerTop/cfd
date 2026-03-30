@@ -34,8 +34,8 @@ Work like a developer looking at a design mockup:
    - Flexbox/grid layout — no \`position:absolute\` for page structure
    - CSS custom properties in \`:root\`
    - BEM class names (\`.hero__title\`, \`.card__image\`, \`.btn--primary\`)
-   - Responsive breakpoints (\`@media\` queries)
    - ALL content from the design — every element visible in the Figma screenshot
+   - Match the frame's exact dimensions — responsiveness comes later in Job 2
 4. **COMPARE** — call \`compare\` to get a parity score and diff image
 5. **READ** the diff image — colors tell you what type of issue (see Diff System below)
 6. **FIX** issues in cleaned.html based on the diff
@@ -81,6 +81,7 @@ The \`submit_cleaned_frame\` tool runs structural quality checks. Submission is 
 - Iterate more than 5 times per frame without asking the user
 - Use \`position:absolute\` for page-level layout
 - Use inline \`style=""\` on structural elements
+- Add responsive \`@media\` queries — that is Job 2 (website build), not frame cleaning
 
 ## Session Logging
 

@@ -83,8 +83,6 @@ Write a complete HTML document to \`frames/{index}/cleaned.html\`:
     .site-header { }
     .hero { }
     .site-footer { }
-
-    @media (max-width: 768px) { }
   </style>
 </head>
 <body>
