@@ -160,10 +160,7 @@ function generateBuildGuide(
     };
   }
 
-  // Navigation = page names in order (for file linking, NOT for rendering as a visible nav bar)
-  const navigation = pages.map((p) => p.name);
-
-  // Auto-classify frames by name heuristics
+  // Auto-classify frames by name heuristics (must happen before navigation derivation)
   const frameClassifications: Record<string, { type: string; name: string; note?: string }> = {};
   const overlayKeywords = ["sidebar", "modal", "popup", "overlay", "drawer", "dropdown", "lightbox", "dialog", "panel", "flyout", "quick view", "quickview"];
   const componentKeywords = ["component", "header only", "footer only", "nav only", "widget"];
@@ -209,6 +206,9 @@ function generateBuildGuide(
   const nonPageFrames = Object.entries(frameClassifications)
     .filter(([, c]) => c.type !== "page")
     .map(([idx, c]) => ({ index: parseInt(idx, 10), ...c }));
+
+  // Navigation derived from FILTERED pages only (excludes overlays/components/states)
+  const navigation = pageEntries.map((p) => p.name);
 
   return {
     pages: pageEntries,

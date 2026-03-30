@@ -403,7 +403,8 @@ export async function startMcpServer(): Promise<void> {
           // Also check locally — raw Figma HTML has position:absolute with pixel top/left
           // (the Figma coordinate pattern). Legitimate cleaned HTML might have some
           // position:absolute for dropdowns/tooltips but NOT with hundreds of px offsets.
-          const absWithPxCoords = (html.match(/position\s*:\s*absolute[^}]*(?:top|left)\s*:\s*\d+px/gi) || []).length;
+          // Match position:absolute + px top/left within the SAME style attribute (not across elements)
+          const absWithPxCoords = (html.match(/style="[^"]*position\s*:\s*absolute[^"]*(?:top|left)\s*:\s*\d+px/gi) || []).length;
           if (absCount > 50 || absWithPxCoords > 20) {
             rawHtmlDetected = true;
             lines.push(`\u{1F6D1} RAW HTML DETECTED: Your HTML has ${absCount} absolute-positioned elements.`);

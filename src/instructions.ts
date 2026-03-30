@@ -439,7 +439,7 @@ For each page in YOUR plan:
 5. **Page title** = page name from build guide (e.g., "Home", "About") — NEVER the frame name (not "Home Page - Desktop")
 6. Link to \`css/styles.css\` for shared tokens
 7. Page-specific styles in \`<style>\` block in \`<head>\`
-8. Images referenced as \`images/{hash}.png\`
+8. Images: \`index.html\` uses \`images/{hash}.png\`, \`pages/*.html\` uses \`../images/{hash}.png\` (one directory up)
 
 ### Step C4: Wire Navigation
 - The \`navigation\` array in build-guide.json is a LIST OF PAGES FOR FILE LINKING (href targets). It is NOT a specification for a visible navigation bar. **DO NOT render it as a visible element.**
