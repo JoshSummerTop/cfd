@@ -1,6 +1,6 @@
 {
   "name": "@codefromdesign/cfd",
-  "version": "0.7.1",
+  "version": "0.8.0",
   "description": "CLI + MCP server for CodeFromDesign — sync Figma-to-code pipeline results with Claude Code",
   "type": "module",
   "bin": {
@@ -36,5 +36,8 @@
     "mcp",
     "claude-code"
   ],
-  "license": "MIT"
+  "license": "MIT",
+  "dependencies": {
+    "node-html-parser": "^7.1.0"
+  }
 }
