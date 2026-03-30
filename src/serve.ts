@@ -72,8 +72,8 @@ export async function startMcpServer(): Promise<void> {
               `    build-guide.json            -- page-to-frame mapping, breakpoints, output structure`,
               `    logs/                       -- session and frame logs (see instructions)`,
               `    frames/`,
-              ...result.frames.map((f) =>
-                `      ${f.index}/                   -- ${f.name} (${f.width}x${f.height}, parity: ${f.parity})`
+              ...result.frames.map((f: any) =>
+                `      ${f.index}/                   -- ${f.name} (${f.width}x${f.height}, parity: ${f.parity}, images: ${f.images ?? "n/a"})`
               ),
               ``,
               `Each frame directory contains:`,
@@ -234,20 +234,25 @@ export async function startMcpServer(): Promise<void> {
           lines.push(...mcpWarnings, ``);
         }
 
-        // MCP-level parity regression check (backup for engine-level check)
-        const metadataPath = join(wsPath, "frames", String(frameIndex), "metadata.json");
-        let originalParity: number | null = null;
-        if (existsSync(metadataPath)) {
-          try {
-            const meta = JSON.parse(await readFile(metadataPath, "utf-8"));
-            originalParity = meta.parityScore ?? null;
-          } catch { /* ignore */ }
-        }
-
-        const currentParity = result.parityScore ?? 0;
-        if (originalParity !== null && currentParity < originalParity - 1) {
-          lines.push(`\u{1F6A8} PARITY REGRESSION: Original rendered.html was ${originalParity.toFixed(1)}%. Your cleaned.html scored ${currentParity.toFixed(1)}%. Your changes made things WORSE. DO NOT SUBMIT.`);
-          lines.push(``);
+        // MCP-level parity regression check (only on iteration 2+).
+        // Iteration 1 converts absolute-positioned Figma HTML to semantic/responsive
+        // HTML — parity drop from raw HTML is expected and normal.
+        const iterationCount = result.iterationCount ?? 1;
+        if (iterationCount >= 2) {
+          const compareLogPath = join(wsPath, "frames", String(frameIndex), "compare-log.json");
+          if (existsSync(compareLogPath)) {
+            try {
+              const logEntries = JSON.parse(await readFile(compareLogPath, "utf-8"));
+              if (Array.isArray(logEntries) && logEntries.length > 0) {
+                const prevParity = logEntries[logEntries.length - 1]?.parity ?? 0;
+                const currentParity = result.parityScore ?? 0;
+                if (currentParity < prevParity - 1) {
+                  lines.push(`\u{1F6A8} PARITY REGRESSION: Previous iteration was ${prevParity.toFixed(1)}%. This iteration scored ${currentParity.toFixed(1)}%. Your latest changes made things WORSE.`);
+                  lines.push(``);
+                }
+              }
+            } catch { /* ignore */ }
+          }
         }
 
         lines.push(`Frame ${frameIndex} comparison complete (iteration ${result.iterationCount})`);

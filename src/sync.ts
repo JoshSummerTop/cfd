@@ -217,7 +217,7 @@ export async function syncJob(
 ): Promise<{
   workspacePath: string;
   frameCount: number;
-  frames: Array<{ index: number; name: string; width: number; height: number; parity: string }>;
+  frames: Array<{ index: number; name: string; width: number; height: number; parity: string; images: string }>;
 }> {
   const jobRes = await engineFetch(config, `/api/jobs/${jobId}`);
   if (!jobRes.ok) {
@@ -264,7 +264,7 @@ export async function syncJob(
 
   // Sync each frame
   const frames = job.frames || [];
-  const frameSummaries: Array<{ index: number; name: string; width: number; height: number; parity: string }> = [];
+  const frameSummaries: Array<{ index: number; name: string; width: number; height: number; parity: string; images: string }> = [];
 
   for (let i = 0; i < frames.length; i++) {
     const frame = frames[i];
@@ -337,29 +337,43 @@ export async function syncJob(
       }
     }
 
-    // Download frame images
+    // Download frame images and rewrite image-map.json with relative paths
+    let imagesDownloaded = 0;
+    let imagesTotal = 0;
     try {
       const mapRes = await engineFetch(config, `/api/jobs/${jobId}/frames/${i}/image-map`);
       if (mapRes.ok) {
         const imageMap: Record<string, string> = await mapRes.json();
+        imagesTotal = Object.keys(imageMap).length;
         const imgDir = join(frameDir, "images");
         await mkdir(imgDir, { recursive: true });
 
+        // Rewrite image-map.json: replace full URLs with relative paths
+        const rewrittenMap: Record<string, string> = {};
+
         await Promise.allSettled(
-          Object.entries(imageMap).map(async ([_ref, value]) => {
+          Object.entries(imageMap).map(async ([ref, value]) => {
             try {
               // image-map.json values may be full URLs (http://localhost:8082/api/.../images/hash.png)
               // or relative paths. Extract just the filename for both API fetch and local storage.
               const filename = value.split("/").pop() || value;
+              rewrittenMap[ref] = `images/${filename}`;
               const imgRes = await engineFetch(config, `/api/jobs/${jobId}/frames/${i}/images/${filename}`);
               if (imgRes.ok) {
                 const data = Buffer.from(await imgRes.arrayBuffer());
                 await writeFile(join(imgDir, filename), data);
+                imagesDownloaded++;
               }
             } catch {
               // Skip missing images
             }
           })
+        );
+
+        // Overwrite image-map.json with relative paths so Claude Code sees clean filenames
+        await writeFile(
+          join(frameDir, "image-map.json"),
+          JSON.stringify(rewrittenMap, null, 2),
         );
       }
     } catch {
@@ -372,9 +386,10 @@ export async function syncJob(
       width: frame.width,
       height: frame.height,
       parity: `${(frame.parityScore ?? 0).toFixed(1)}%`,
+      images: `${imagesDownloaded}/${imagesTotal}`,
     });
 
-    console.error(`[cfd] synced frame ${i}/${frames.length - 1}: ${frame.name}`);
+    console.error(`[cfd] synced frame ${i}/${frames.length - 1}: ${frame.name} (images: ${imagesDownloaded}/${imagesTotal})`);
   }
 
   // Generate build guide (page-to-frame mapping, breakpoints, output structure)

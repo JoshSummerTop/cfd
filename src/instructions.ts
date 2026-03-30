@@ -17,7 +17,7 @@ These rules override all other instructions. Violations are failures.
 
 AGENT LIMIT: NEVER launch more than 2 background agents simultaneously. This overrides any instruction to "maximize concurrency" or "launch multiple agents." Launch 2, wait for one to finish, then launch the next. THREE OR MORE SIMULTANEOUS AGENTS = FAILURE.
 
-PARITY GUARD: If your cleaned.html scores LOWER parity than the original rendered.html, STOP IMMEDIATELY. Do not submit. Do not continue. Your changes made things worse. Review for broken image paths, missing content, or layout destruction.
+PARITY GUARD: On iteration 2+, if parity DROPS compared to your previous iteration, STOP. Your latest changes made things worse. Review for broken image paths, missing content, or layout destruction. (Iteration 1 may score lower than the raw Figma HTML — this is expected because you are converting absolute positioning to semantic/responsive layout.)
 
 IMAGE PATHS: NEVER use localhost URLs, API URLs, or any http:// path in image references. All images use relative paths: images/{hash}.png. All SVGs are inlined. If you see "localhost" or "engine.codefromdesign" in an img src, you have a critical bug.
 
@@ -291,7 +291,7 @@ For each frame:
 
 **Minimum 2 iterations per frame.** Your first pass will never be perfect. Always compare, read the diff, fix issues, and compare again. If you submit after a single pass without comparing, you are doing it wrong.
 
-**PARITY REGRESSION GUARD:** After each compare, check whether the parity score IMPROVED or DECLINED compared to the original rendered.html parity (found in metadata.json → parityScore). If your cleaned.html scores LOWER than the original, you have made things WORSE — STOP. Do not iterate further. Revert to studying the original HTML more carefully. A cleaning that reduces parity is worse than no cleaning at all. The compare tool will warn you if regression is detected.
+**PARITY REGRESSION GUARD:** Your first compare (iteration 1) may score lower than the raw Figma HTML — this is normal because you are converting absolute positioning to semantic/responsive layout. On iteration 2 and beyond, parity should IMPROVE with each iteration. If parity DROPS between iterations (e.g., iteration 2 scores lower than iteration 1), STOP — your latest changes made things worse. The compare tool will warn you if regression is detected on iteration 2+.
 
 **Maximum 5 iterations per frame.** If after 5 compare iterations you still haven't reached 95% parity, STOP and notify the user. Report the current parity score, what the remaining issues are (based on the diff colors), and ask for guidance. Do NOT keep iterating endlessly — diminishing returns burn usage quickly.
 
@@ -381,9 +381,10 @@ This structure is NOT optional. \`submit_website\` expects it. The web app rende
 
 For each page in build-guide.json:
 1. **Desktop cleaned.html** = base structure, all content, default CSS
-2. **Laptop cleaned.html** = REFERENCE ONLY for responsive adjustments at laptop width — extract ONLY the CSS differences vs. Desktop (layout changes, font size changes, spacing changes)
-3. **Mobile cleaned.html** = REFERENCE ONLY for responsive adjustments at mobile width — extract ONLY the CSS differences vs. Desktop
+2. **Laptop cleaned.html** (if available) = REFERENCE ONLY for responsive adjustments — extract ONLY the CSS differences vs. Desktop
+3. **Mobile cleaned.html** (if available) = REFERENCE ONLY for responsive adjustments — extract ONLY the CSS differences vs. Desktop
 4. Merge into **ONE responsive HTML file** with CSS media queries
+   - **If only desktop frames exist** (common): add your own responsive breakpoints at 768px and 375px using standard patterns (single-column on mobile, reduced font sizes, stacked grids). Use the desktop frame as the sole reference.
 5. **Page title** = page name from build guide (e.g., "Home", "About") — NEVER the frame name (not "Home Page - Desktop")
 6. Link to \`css/styles.css\` for shared tokens
 7. Page-specific styles in \`<style>\` block in \`<head>\`
@@ -455,15 +456,17 @@ const IMAGES_AND_SVGS = `## Images and SVGs
 
 Each frame has real images and SVG vectors from the Figma design. These are critical for visual accuracy.
 
-### Images
+### Images — Step-by-Step Procedure
 
-- Stored in \`frames/{idx}/images/\` as hash-named PNG files (e.g., \`077b9b1fb51c319c.png\`)
-- \`image-map.json\` maps reference IDs to filenames
-- In \`ai-ready.html\`, images appear as elements with \`data-image-ref\` attributes
-- When writing \`cleaned.html\`, reference images with relative paths: \`images/077b9b1fb51c319c.png\`
-- The compare endpoint copies these images to Chrome's render directory automatically
-- **NEVER use absolute URLs, localhost URLs, or API endpoint URLs** for images. The pattern \`http://localhost:8082/api/...\` or \`https://engine.codefromdesign.com/api/...\` is ALWAYS wrong in cleaned.html. Images are LOCAL files. The only valid image src format is: \`images/{filename}.png\` (relative path).
-- Before submitting any cleaned.html, search your output for "localhost" and "http" in img src attributes. If found, replace with the correct relative path from image-map.json. The compare tool will warn you if it detects these.
+1. **Read \`image-map.json\`** — it maps reference IDs to relative paths: \`{ "img-0": "images/hash.png", "img-1": "images/hash.jpg" }\`
+2. **Find \`data-image-ref\` attributes** in \`ai-ready.html\` — e.g., \`<div data-image-ref="img-0">\`
+3. **Look up the ref in image-map.json** — \`"img-0"\` → \`"images/2727769ba747.png"\`
+4. **Use that relative path in your cleaned.html** — \`<img src="images/2727769ba747.png" alt="..." />\` or \`background-image: url(images/2727769ba747.png)\`
+5. **The compare endpoint copies these images** to Chrome's render directory automatically — relative paths just work.
+
+**Image files** are stored in \`frames/{idx}/images/\` as hash-named files (PNG, JPG). The sync downloads them from the engine.
+
+**NEVER use absolute URLs, localhost URLs, or API endpoint URLs** for images. The pattern \`http://localhost:8082/api/...\` or \`https://engine.codefromdesign.com/api/...\` is ALWAYS wrong. The only valid format is: \`images/{filename}\` (relative path). The compare tool will warn you if it detects these.
 
 ### SVGs / Icons
 
@@ -625,8 +628,8 @@ const TOOLS_REFERENCE = `## MCP Tools Reference
 | \`sync\` | Download all frame data (HTML, screenshots, diffs, images, SVGs) to workspace |
 | \`compare\` | Send cleaned.html to engine → get screenshot + diff + parity score |
 | \`submit_cleaned_frame\` | Upload final cleaned HTML for a frame |
-| \`build\` | Trigger website assembly from all cleaned frames |
-| \`submit_website\` | Upload a locally-built website directory to the engine |
+| \`build\` | Trigger the ENGINE to assemble a website from cleaned frames (engine does the work) |
+| \`submit_website\` | Upload YOUR locally-built website directory to the engine (YOU do the work — this is the standard flow) |
 | \`get_snips\` | List user-reported visual issues (snips) with cropped screenshots |
 | \`clear_snips\` | Remove all snips for a job after issues are resolved |
 | \`workspace_path\` | Get the local path to a job's workspace |
