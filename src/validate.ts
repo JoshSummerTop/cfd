@@ -9,11 +9,22 @@ import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 
-// How many percentage points a cleaned compare may trail the ai-ready
-// baseline before the submit gate refuses the submission. Covers Chromium
-// run-to-run nondeterminism and minor rendering noise without letting real
-// regressions through.
-export const PARITY_REGRESSION_TOLERANCE = 2.0;
+// Parity gate philosophy: the structural gate (semantic HTML, flex/grid,
+// no raw positioning) enforces production quality. The parity gate is a
+// WIDE guardrail that only blocks catastrophic regressions — "the HTML is
+// clearly broken" — not imperfect matching. Agents were getting stuck in
+// 28-33 iteration loops chasing a tight 2pp tolerance; the user's direction
+// is "try your best and ship what you're best at." So we let agents ship
+// when their cleaned.html is within a reasonable band of the engine-rendered
+// baseline, and reserve blocking for truly destructive outputs.
+//
+// The gate blocks when EITHER:
+//   - cleaned parity trails baseline by more than PARITY_REGRESSION_TOLERANCE, OR
+//   - cleaned parity falls below PARITY_ABSOLUTE_FLOOR (indicates broken HTML
+//     regardless of baseline — e.g. the page is mostly blank or renders wrong
+//     colors everywhere).
+export const PARITY_REGRESSION_TOLERANCE = 15.0;
+export const PARITY_ABSOLUTE_FLOOR = 40.0;
 
 // ---------------------------------------------------------------------------
 // Result types
@@ -340,6 +351,24 @@ export async function checkParityRegression(
 
   const metricLabel = metric === "nonFont" ? "non-font parity" : "parity";
   const delta = current - baseline;
+
+  // Block only on catastrophic regression (>tolerance trailing baseline) OR
+  // absolute floor breach (output is broken regardless of baseline). Within
+  // tolerance or above the floor → ship. "Try your best and ship what
+  // you're best at."
+  if (current < PARITY_ABSOLUTE_FLOOR) {
+    return {
+      status: "regressed",
+      baseline,
+      current,
+      delta,
+      metric,
+      message:
+        `${metricLabel[0].toUpperCase() + metricLabel.slice(1)} ${current.toFixed(1)}% is below the absolute floor (${PARITY_ABSOLUTE_FLOOR}%). ` +
+        `This indicates broken HTML (page mostly blank, wrong colors everywhere, or structural collapse). ` +
+        `Baseline is ${baseline.toFixed(1)}%. Fix the page before submitting.`,
+    };
+  }
   if (delta < -tolerance) {
     return {
       status: "regressed",
@@ -348,9 +377,9 @@ export async function checkParityRegression(
       delta,
       metric,
       message:
-        `${metricLabel[0].toUpperCase() + metricLabel.slice(1)} regressed vs ai-ready baseline: ` +
-        `${current.toFixed(1)}% < ${baseline.toFixed(1)}% − ${tolerance.toFixed(1)}% tolerance ` +
-        `(delta ${delta.toFixed(1)}pp).`,
+        `${metricLabel[0].toUpperCase() + metricLabel.slice(1)} trails ai-ready baseline by more than ${tolerance.toFixed(0)}pp: ` +
+        `${current.toFixed(1)}% vs baseline ${baseline.toFixed(1)}% (delta ${delta.toFixed(1)}pp). ` +
+        `The gate is deliberately wide — if you're this far off, the output is visibly broken.`,
     };
   }
 

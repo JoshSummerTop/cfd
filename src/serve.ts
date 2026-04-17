@@ -31,7 +31,7 @@ export async function startMcpServer(): Promise<void> {
   const config = await loadConfig();
 
   const server = new McpServer(
-    { name: "cfd", version: "0.10.0" },
+    { name: "cfd", version: "0.10.1" },
     { instructions: HANDSHAKE_INSTRUCTIONS },
   );
 
@@ -333,16 +333,18 @@ export async function startMcpServer(): Promise<void> {
             content: [{
               type: "text",
               text: [
-                `SUBMISSION BLOCKED — parity regression vs ai-ready baseline.`,
+                `SUBMISSION BLOCKED — output appears broken (far below baseline or below absolute floor).`,
                 ``,
                 `  Baseline (engine render):  ${baselineStr}%`,
                 `  Latest cleaned compare:    ${currentStr}%`,
                 `  Delta:                     ${deltaStr}`,
                 ``,
-                `Iterate on cleaned.html and re-run compare until parity at least matches the baseline.`,
-                `Work strip-by-strip from the compare response — clean strips already match; spend effort on dirty ones.`,
+                `The parity gate is deliberately wide — 15pp tolerance plus a 40% absolute floor. Blocking means something concrete is wrong, not that parity is imperfect. Likely causes:`,
+                `  • Broken image paths (check frames/${frameIndex}/images/ and data-image-ref resolution).`,
+                `  • Entire sections rendering blank (missing content, malformed HTML).`,
+                `  • Structural collapse from aggressive CSS rewrites.`,
                 ``,
-                `If this regression is intentional (e.g. decorative region deliberately removed), override with:`,
+                `Fix the visible breakage and re-run compare. If the regression is intentional (e.g. decorative region deliberately removed) you can override:`,
                 `  submit_cleaned_frame({ jobId, frameIndex, force: true, forceReason: "…" })`,
               ].join("\n"),
             }],
@@ -691,6 +693,38 @@ export async function startMcpServer(): Promise<void> {
 
         const html = await readFile(cleanedPath, "utf-8");
 
+        // Hard iteration cap. We've seen agents run 28-33 iterations on a
+        // single frame, plateau, and eventually die to the 32MB request
+        // ceiling. The stall warning + soft guidance weren't closing the loop.
+        // Refuse further compares past this point — the agent must submit (if
+        // the gate passes), restart from ai-ready.html with force, or abandon.
+        const MAX_COMPARE_ITERATIONS = 20;
+        const compareLogPath = join(wsPath, "frames", String(frameIndex), "compare-log.json");
+        let priorIterationCount = 0;
+        if (existsSync(compareLogPath)) {
+          try {
+            const entries = JSON.parse(await readFile(compareLogPath, "utf-8"));
+            if (Array.isArray(entries)) priorIterationCount = entries.length;
+          } catch { /* treat as zero */ }
+        }
+        if (priorIterationCount >= MAX_COMPARE_ITERATIONS) {
+          return {
+            content: [{
+              type: "text",
+              text: [
+                `COMPARE BUDGET EXHAUSTED — frame ${frameIndex} has ${priorIterationCount} iterations already (cap ${MAX_COMPARE_ITERATIONS}).`,
+                ``,
+                `You will not get another compare on this frame. Decide now:`,
+                `  • If non-font parity is within 2pp of the ai-ready baseline (check the last compare response) — call submit_cleaned_frame. The gate will pass.`,
+                `  • If parity is still far off — call save_frame_note with what's blocking you, then move on to the next frame.`,
+                `  • If this frame is structurally unfixable (layered absolute layout, carousel, Figma feature unsupported) — force-submit with a clear forceReason.`,
+                ``,
+                `The cap exists because runaway iteration loops burn payload budget, destabilize the API session, and rarely converge. Land it.`,
+              ].join("\n"),
+            }],
+          };
+        }
+
         // Send to engine for screenshot + diff
         const res = await engineFetch(config, `/api/jobs/${jobId}/frames/${frameIndex}/compare`, {
           method: "POST",
@@ -727,9 +761,15 @@ export async function startMcpServer(): Promise<void> {
           lines.push(`Target (ai-ready):  overall ${fmt(ar).padEnd(7)} non-font ${fmt(arNf)}`);
           lines.push(`You are now:        overall ${fmt(cur).padEnd(7)} non-font ${fmt(curNf)}`);
           if (delta != null) {
-            const tol = 2.0; // must match validate.ts PARITY_REGRESSION_TOLERANCE
+            // Submit gate is deliberately wide (15pp). The band between 0
+            // and -15pp is "ship it" territory. Below -15 or below the
+            // absolute floor of 40% indicates broken HTML and the gate will
+            // block. Show agents where they stand relative to both bands.
+            const tol = 15.0; // must match validate.ts PARITY_REGRESSION_TOLERANCE
             const sign = delta >= 0 ? "+" : "";
-            const flag = delta < -tol ? "   ← below tolerance, submit gate will BLOCK" : "";
+            let flag = "   ← ship-it range; submit gate will pass";
+            if (delta < -tol) flag = "   ← more than 15pp off; gate will BLOCK (output is broken, not just imperfect)";
+            else if (delta < -5) flag = "   ← off by a few pp; fine to submit once structure is solid";
             lines.push(`Delta vs baseline:  non-font ${sign}${delta.toFixed(1)}pp${flag}`);
           }
         } else {
@@ -747,16 +787,40 @@ export async function startMcpServer(): Promise<void> {
         }
         lines.push(`Duration: ${result.durationMs}ms`);
 
+        // Budget + stopping hints — always visible so agents can self-regulate.
+        const itersLeft = MAX_COMPARE_ITERATIONS - iterationCount;
+        if (itersLeft <= 5) {
+          lines.push(``);
+          lines.push(`Compare budget: ${iterationCount}/${MAX_COMPARE_ITERATIONS} used, ${itersLeft} remaining before HARD STOP. ${itersLeft <= 2 ? "Decide NOW: submit, save_frame_note + move on, or force-submit with reason." : "Wrap this up in the next 1-2 iterations."}`);
+        }
+
+        // Image-issue banner. When the top nodes include missing_image or
+        // wrong_image_fit, agents historically miss the signal and chase
+        // CSS colors instead. Call it out prominently.
+        const imageNodes = Array.isArray(result.topFailingNodes)
+          ? (result.topFailingNodes as Array<{ nodeId: string; failureType: string; nodeName?: string; diffPixels?: number }>).filter(n => n.failureType === "missing_image" || n.failureType === "wrong_image_fit")
+          : [];
+        if (imageNodes.length > 0) {
+          lines.push(``);
+          lines.push(`⚠ IMAGE ISSUE DETECTED — ${imageNodes.length} node(s). CSS color edits cannot fix these:`);
+          for (const n of imageNodes.slice(0, 5)) {
+            const kind = n.failureType === "missing_image"
+              ? "asset didn't load (check frames/" + frameIndex + "/images/ and the image path in cleaned.html)"
+              : "image loaded but wrong crop/size (adjust background-size or background-position)";
+            lines.push(`  ${n.nodeId} '${n.nodeName ?? "unnamed"}' — ${n.failureType}: ${kind}`);
+          }
+        }
+
         // Surface the tail of notes.md so agents carry context across
-        // iterations / retries without re-discovering. Cap at 500 chars so
-        // this stays under the payload budget even when the notes file grows.
+        // iterations / retries without re-discovering. Moved UP in the
+        // response so it's visible before the strip map + images.
         const notesPath = join(wsPath, "frames", String(frameIndex), "notes.md");
         if (existsSync(notesPath)) {
           try {
             const notes = await readFile(notesPath, "utf-8");
-            const tail = notes.length > 500 ? "…\n" + notes.slice(notes.length - 500) : notes;
+            const tail = notes.length > 600 ? "…\n" + notes.slice(notes.length - 600) : notes;
             lines.push(``);
-            lines.push(`Prior notes (frames/${frameIndex}/notes.md — use save_frame_note to append):`);
+            lines.push(`Prior notes (frames/${frameIndex}/notes.md — auto-logged by compare + your save_frame_note calls):`);
             for (const ln of tail.split("\n")) if (ln.length > 0) lines.push(`  ${ln}`);
           } catch { /* non-critical */ }
         }
@@ -783,8 +847,8 @@ export async function startMcpServer(): Promise<void> {
 
         // Regression + stall detection. Reads compare-log.json (updated by
         // engine AFTER this compare returns — so the "last entry" is iter N-1).
+        // compareLogPath was declared above for the hard-iteration-cap check.
         if (iterationCount >= 2) {
-          const compareLogPath = join(wsPath, "frames", String(frameIndex), "compare-log.json");
           if (existsSync(compareLogPath)) {
             try {
               const logEntries = JSON.parse(await readFile(compareLogPath, "utf-8"));
@@ -876,15 +940,20 @@ export async function startMcpServer(): Promise<void> {
           const totalDiff = dirty.reduce((sum, s) => sum + (s.diffPixels ?? 0), 0);
           // Payload stop-loss. The subagent API caps a single request at 32 MB
           // and accumulates each compare's base64 images into the same session
-          // context. Unbounded, 15-25 iterations blow the cap. Strategy:
-          //   • Hard cap on dirty strips per response (keep biggest N).
-          //   • After iter 8, drop figma/cleaned strips (keep diff only) —
-          //     agent already knows the design by then; the diff shows the
-          //     remaining work.
-          //   • After iter 15, drop strip images entirely — text-only map.
-          const MAX_DIRTY_STRIPS = 4;
-          const DROP_FIGMA_CLEANED_AFTER = 8;
-          const DROP_IMAGES_AFTER = 15;
+          // context. Tuned against observed agent sessions (frame 0 died at
+          // iter 19, frame 1 at iter 28 with the old 4/8/15 tiers):
+          //   • 3 dirty strips max per response (keep biggest N by diffPixels).
+          //   • After iter 3, drop figma/cleaned strip images. Agent has seen
+          //     the design three times by then; the diff alone shows what's
+          //     still broken. If they need figma/cleaned again, sync_frame
+          //     pulls them on demand.
+          //   • After iter 10, drop all strip images. Text strip map + top
+          //     nodes + notes are enough to finish or decide to submit.
+          // Math: 3 strips × 3 images × 500KB × 3 iters + 3×1×500KB × 7 iters
+          // ≈ 24MB at iter 10, then flat. Well under the 32MB ceiling.
+          const MAX_DIRTY_STRIPS = 3;
+          const DROP_FIGMA_CLEANED_AFTER = 3;
+          const DROP_IMAGES_AFTER = 10;
           const sendImages = iterationCount <= DROP_IMAGES_AFTER;
           const sendFigmaCleaned = iterationCount <= DROP_FIGMA_CLEANED_AFTER;
           const dirtySorted = [...dirty].sort((a, b) => (b.diffPixels ?? 0) - (a.diffPixels ?? 0));
@@ -976,6 +1045,33 @@ export async function startMcpServer(): Promise<void> {
             await writeFile(join(wsPath, "frames", String(frameIndex), "compare-log.json"), logData);
           }
         } catch { /* non-critical */ }
+
+        // Auto-append a one-line entry to notes.md so every compare leaves a
+        // breadcrumb. Removes reliance on agent discipline to call
+        // save_frame_note; retries and next iterations see a clean history
+        // of parity + top-failing-node per iteration. Agents can still add
+        // their own richer notes via save_frame_note on top of these.
+        try {
+          const ts = new Date().toISOString();
+          const top = Array.isArray(result.topFailingNodes) && result.topFailingNodes.length > 0
+            ? (result.topFailingNodes as Array<{ nodeId: string; failureType: string; diffPixels?: number; fixable?: boolean }>)[0]
+            : null;
+          const deltaStr = typeof result.baselineDelta === "number"
+            ? `${result.baselineDelta >= 0 ? "+" : ""}${(result.baselineDelta as number).toFixed(1)}pp`
+            : "n/a";
+          const nfStr = typeof result.nonFontParity === "number"
+            ? (result.nonFontParity as number).toFixed(1)
+            : "n/a";
+          const overallStr = typeof result.parityScore === "number"
+            ? (result.parityScore as number).toFixed(1)
+            : "n/a";
+          const topStr = top
+            ? `top ${top.nodeId} ${top.failureType} ${top.diffPixels?.toLocaleString() ?? "?"}px${top.fixable === false ? " [engine-inherent]" : ""}`
+            : "no failing nodes";
+          const autoLine = `- [${ts}] AUTO iter ${iterationCount}: overall ${overallStr}% non-font ${nfStr}% (Δ ${deltaStr}) · ${topStr}\n`;
+          const prior = existsSync(notesPath) ? await readFile(notesPath, "utf-8") : `# Frame ${frameIndex} notes\n\n`;
+          await writeFile(notesPath, prior + autoLine, "utf-8");
+        } catch { /* non-critical; don't fail the compare just because notes failed */ }
 
         return { content };
       } catch (err: any) {

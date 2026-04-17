@@ -15,23 +15,25 @@ Each frame has HTML from the engine with the correct content — every heading, 
 
 **TRANSFORM, don't rewrite.** The content is correct. The layout needs restructuring. This is a surgical edit — not starting from a blank page.
 
-## Your Target Is the Baseline, Not 90%
+## Try Your Best, Ship What You Have
 
 Every \`compare\` response shows three lines:
 
 \`\`\`
 Target (ai-ready):  overall 85.1%  non-font 89.4%
 You are now:        overall 82.6%  non-font 87.8%
-Delta vs baseline:  non-font -1.6pp
+Delta vs baseline:  non-font -1.6pp   ← ship-it range
 \`\`\`
 
-The **baseline** is what the engine's own rendered.html scored against the Figma reference. It's the honest ceiling for this particular frame. If that number is 84%, the best a cleaning agent can do is match it — there is no path to 90% on that frame because the engine itself can't get there (unfixable font rendering, subpixel differences, designer-authored opacity:0 carousels, etc.).
+The **baseline** is what the engine's own rendered.html scored against the Figma reference. Match it when you can; it's fine to ship a few points off when you can't. The real deliverable is semantic HTML + correct structure, not pixel-perfect parity.
 
-**Your target:** current non-font parity ≥ baseline non-font parity − 2pp.
+**Submit gate policy:**
+- **Structural gate stays strict.** Semantic elements, flex/grid, no raw Figma positioning, no localhost URLs. These are non-negotiable production standards. Fix these before submitting — no exceptions.
+- **Parity gate is a wide guardrail, not a perfection bar.** It blocks only catastrophic regressions (more than 15pp below baseline, or below the 40% absolute floor). Within that band, ship.
 
-Non-font parity excludes Chromium-vs-Figma font rendering, which you cannot fix by editing HTML. The submit gate uses non-font for the same reason. Chase non-font; overall is for reference.
+Non-font parity is the metric — it excludes Chromium-vs-Figma font rendering you can't fix. Aim for baseline, settle for "within a few points," call it done once structure is clean.
 
-Do NOT iterate toward 90% on a file whose baseline is 84%. You will burn iterations against a wall, blow the payload budget, and eventually hit a STALL warning.
+**Do not chase perfect parity.** Iteration 28 chasing a 3pp gap is wasted work. Iteration 5 submitting at -6pp with solid structure is shipped.
 
 ## Your Inputs
 
@@ -96,11 +98,14 @@ What the design should look like. When in doubt, match this.
 4. **VALIDATE** — call \`validate\` to check structural quality. Fix errors before compare.
 5. **COMPARE** — call \`compare\`. Read the target/you-are-now/delta block first.
 6. **FIX** the top failing nodes. Use the \`fixable\` tag: skip anything marked engine-inherent.
-7. **REPEAT** 5-6. Stop at any of:
-   - Delta vs baseline ≥ -2pp (gate will pass — submit).
-   - STALL warning appears (parity flat + topIssue cycling; see below).
-   - 8 iterations elapsed.
-8. **NOTE** — before a retry or a handoff, call \`save_frame_note\` with one-line observations: what you tried, what regressed, broken image refs you found. The next agent reads these inline in the compare response.
+7. **REPEAT** 5-6. Stop at any of (whichever hits first):
+   - Structure is clean AND delta is anywhere in the "ship-it range" (i.e. not more than 15pp below baseline and above the 40% floor). **Just submit.** Don't chase small deltas.
+   - 5 iterations with steady but minor improvement → submit what you have.
+   - STALL warning appears (parity flat + topIssue cycling; see below) → submit or save_frame_note + move on.
+   - IMAGE ISSUE DETECTED banner appears → fix the image path or force-submit with reason (CSS edits cannot fix it).
+   - 10 iterations reached (soft stop — re-evaluate if there's a specific breakthrough ahead).
+   - Compare refuses to run past **iteration 20** (hard stop).
+8. **NOTE** — every compare auto-appends a breadcrumb (iter N: parity X% delta Y top-node Z) to \`frames/{i}/notes.md\`. Use \`save_frame_note\` on top of that for richer observations: strategies that regressed, broken image refs, layout class you identified, anything a retry agent would benefit from knowing.
 9. **SUBMIT** — call \`submit_cleaned_frame\`.
 
 ## Reading a STALL Warning
@@ -160,7 +165,8 @@ Only for intentional structural changes that legitimately regressed parity — e
 - Add UI elements not in the Figma screenshot.
 - Use position:absolute for page-level layout (fine for overlays in relative containers).
 - Add responsive @media queries — that is Job 2.
-- Keep iterating past iteration 8 or past a STALL warning. Submit or note + hand off instead.
+- Keep iterating past iteration 10 or past a STALL warning, or past an IMAGE ISSUE banner. Submit, note + hand off, or force-submit with reason.
+- Apply "universal transforms" across frames. A script that worked on frame 1 (stacked vertical layout) will flatten frame 0 if frame 0 uses layered absolute positioning (hero + gradient overlay + nav bar at the same y-coord). Inspect the frame's structure before applying any blanket position-absolute→transform conversion.
 - Read \`cleaned-issue-diff.json\` directly when the inline top-N tables already answer the question. That file is 80KB+ and blocks context.
 
 ## Background Agents
