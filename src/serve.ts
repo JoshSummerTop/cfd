@@ -31,7 +31,7 @@ export async function startMcpServer(): Promise<void> {
   const config = await loadConfig();
 
   const server = new McpServer(
-    { name: "cfd", version: "0.9.1" },
+    { name: "cfd", version: "0.10.0" },
     { instructions: HANDSHAKE_INSTRUCTIONS },
   );
 
@@ -189,6 +189,94 @@ export async function startMcpServer(): Promise<void> {
         };
       } catch (err: any) {
         return { content: [{ type: "text", text: `Sync frame failed: ${err.message}` }] };
+      }
+    }
+  );
+
+  // --- Tool: init_cleaned_frame ---
+  // Copies ai-ready.html to cleaned.html for a frame. Agents hit this as their
+  // first step so they have a starting point to edit — without relying on the
+  // subagent being able to run `cp` or `node transform.js` in bash (restricted
+  // by Claude Code permissions). If cleaned.html already exists, the tool
+  // refuses unless force:true is passed, to avoid clobbering in-progress work.
+  server.tool(
+    "init_cleaned_frame",
+    "Initialize frames/{index}/cleaned.html from ai-ready.html so you have a starting point to transform. Use this as step 0 when you start cleaning a frame — avoids needing `cp` in bash. Refuses to overwrite an existing cleaned.html unless force:true is passed.",
+    {
+      jobId: z.string().describe("The job ID"),
+      frameIndex: z.number().describe("The frame index (0-based)"),
+      force: z.boolean().optional().describe("Overwrite an existing cleaned.html. Use only when intentionally restarting a frame."),
+    },
+    async ({ jobId, frameIndex, force }) => {
+      try {
+        const wsPath = getWorkspacePath(jobId);
+        const frameDir = join(wsPath, "frames", String(frameIndex));
+        const aiReadyPath = join(frameDir, "ai-ready.html");
+        const cleanedPath = join(frameDir, "cleaned.html");
+
+        if (!existsSync(aiReadyPath)) {
+          return { content: [{ type: "text", text: `No ai-ready.html at ${aiReadyPath}. Run sync first to populate frame artifacts.` }] };
+        }
+        if (existsSync(cleanedPath) && force !== true) {
+          return {
+            content: [{
+              type: "text",
+              text: `cleaned.html already exists at ${cleanedPath}. Pass force:true to overwrite (e.g. when intentionally restarting). Otherwise continue editing the existing file.`,
+            }],
+          };
+        }
+        const html = await readFile(aiReadyPath, "utf-8");
+        await writeFile(cleanedPath, html, "utf-8");
+        return {
+          content: [{
+            type: "text",
+            text: `Initialized cleaned.html from ai-ready.html (${html.length} bytes). Now transform it: wrap sections in semantic tags, replace absolute positioning with flexbox/grid from manifest.json autoLayout, move inline styles to a <style> block. Run validate → compare → submit_cleaned_frame.`,
+          }],
+        };
+      } catch (err: any) {
+        return { content: [{ type: "text", text: `init_cleaned_frame failed: ${err.message}` }] };
+      }
+    }
+  );
+
+  // --- Tool: save_frame_note ---
+  // Persists a short agent-authored note to frames/{index}/notes.md. The
+  // compare tool reads the tail of this file and surfaces it back so a retry
+  // agent (or the same agent on iteration N+1) sees what the previous attempt
+  // discovered — "don't re-try strategy X, it regressed" — without having to
+  // re-derive it from the compare log.
+  server.tool(
+    "save_frame_note",
+    "Append a short note to frames/{index}/notes.md so future iterations/agent retries see what you tried and what didn't work. Use for: strategies that regressed, specific broken nodes you identified, height-drift findings, image nodes you confirmed are missing assets. Short entries only (one-liners, not essays).",
+    {
+      jobId: z.string().describe("The job ID"),
+      frameIndex: z.number().describe("The frame index (0-based)"),
+      note: z.string().describe("A short note (1-3 sentences). Prefix with a category like 'TRIED:' 'BROKEN:' 'LEARNED:' so the tail is scannable."),
+    },
+    async ({ jobId, frameIndex, note }) => {
+      try {
+        const wsPath = getWorkspacePath(jobId);
+        const frameDir = join(wsPath, "frames", String(frameIndex));
+        if (!existsSync(frameDir)) {
+          return { content: [{ type: "text", text: `No frame directory at ${frameDir}. Run sync first.` }] };
+        }
+        const notesPath = join(frameDir, "notes.md");
+        const trimmed = note.trim();
+        if (trimmed.length === 0) {
+          return { content: [{ type: "text", text: `note is empty — nothing to save.` }] };
+        }
+        const ts = new Date().toISOString();
+        const line = `- [${ts}] ${trimmed}\n`;
+        const prior = existsSync(notesPath) ? await readFile(notesPath, "utf-8") : `# Frame ${frameIndex} notes\n\n`;
+        await writeFile(notesPath, prior + line, "utf-8");
+        return {
+          content: [{
+            type: "text",
+            text: `Saved to notes.md (${(prior + line).length} bytes total). Next compare will surface the tail of this file.`,
+          }],
+        };
+      } catch (err: any) {
+        return { content: [{ type: "text", text: `save_frame_note failed: ${err.message}` }] };
       }
     }
   );
@@ -623,17 +711,55 @@ export async function startMcpServer(): Promise<void> {
 
         lines.push(`Frame ${frameIndex} — iteration ${iterationCount}`);
         lines.push(``);
-        lines.push(`Parity: ${result.parityScore?.toFixed(1) ?? "n/a"}%`);
-        if (result.nonFontParity != null) {
-          lines.push(`Non-font: ${result.nonFontParity.toFixed(1)}%`);
+
+        // Prominent target vs current vs delta block. Non-font is the agent-
+        // addressable metric (excludes Chromium-vs-Figma font rendering that
+        // cleaning edits cannot fix); overall is the ceiling. Agents should
+        // aim for current non-font ≥ baseline non-font − 2pp, NOT for a fixed
+        // 90%. Most files have unfixable engine diff that makes 90% impossible.
+        const ar = result.aiReadyParity as number | undefined;
+        const arNf = result.aiReadyNonFontParity as number | undefined;
+        const cur = result.parityScore as number | undefined;
+        const curNf = result.nonFontParity as number | undefined;
+        const delta = result.baselineDelta as number | undefined;
+        const fmt = (n: number | undefined) => n == null ? "n/a" : `${n.toFixed(1)}%`;
+        if (ar != null || arNf != null) {
+          lines.push(`Target (ai-ready):  overall ${fmt(ar).padEnd(7)} non-font ${fmt(arNf)}`);
+          lines.push(`You are now:        overall ${fmt(cur).padEnd(7)} non-font ${fmt(curNf)}`);
+          if (delta != null) {
+            const tol = 2.0; // must match validate.ts PARITY_REGRESSION_TOLERANCE
+            const sign = delta >= 0 ? "+" : "";
+            const flag = delta < -tol ? "   ← below tolerance, submit gate will BLOCK" : "";
+            lines.push(`Delta vs baseline:  non-font ${sign}${delta.toFixed(1)}pp${flag}`);
+          }
+        } else {
+          // Older engine without AiReady fields — show what we have.
+          lines.push(`Parity: ${fmt(cur)}`);
+          if (curNf != null) lines.push(`Non-font: ${fmt(curNf)}`);
         }
+
+        lines.push(``);
         if (result.layoutParity != null) {
-          lines.push(`Layout: ${result.layoutParity.toFixed(1)}%  Font: ${result.fontParity?.toFixed(1) ?? "n/a"}%  Image: ${result.imageParity?.toFixed(1) ?? "n/a"}%  Vector: ${result.vectorParity?.toFixed(1) ?? "n/a"}%`);
+          lines.push(`Breakdown: layout ${fmt(result.layoutParity)}  font ${fmt(result.fontParity)}  image ${fmt(result.imageParity)}  vector ${fmt(result.vectorParity)}`);
         }
         if (result.topIssue) {
           lines.push(`Top issue: ${result.topIssue} (${result.topIssueDiffPixels} diff px)`);
         }
         lines.push(`Duration: ${result.durationMs}ms`);
+
+        // Surface the tail of notes.md so agents carry context across
+        // iterations / retries without re-discovering. Cap at 500 chars so
+        // this stays under the payload budget even when the notes file grows.
+        const notesPath = join(wsPath, "frames", String(frameIndex), "notes.md");
+        if (existsSync(notesPath)) {
+          try {
+            const notes = await readFile(notesPath, "utf-8");
+            const tail = notes.length > 500 ? "…\n" + notes.slice(notes.length - 500) : notes;
+            lines.push(``);
+            lines.push(`Prior notes (frames/${frameIndex}/notes.md — use save_frame_note to append):`);
+            for (const ln of tail.split("\n")) if (ln.length > 0) lines.push(`  ${ln}`);
+          } catch { /* non-critical */ }
+        }
 
         // Actionable breakdown — these replace the need to fetch and read
         // cleaned-issue-diff.json for most iteration work.
@@ -655,18 +781,52 @@ export async function startMcpServer(): Promise<void> {
           }
         }
 
-        // Parity regression detection (iteration 2+) — this is actionable data, not a warning
+        // Regression + stall detection. Reads compare-log.json (updated by
+        // engine AFTER this compare returns — so the "last entry" is iter N-1).
         if (iterationCount >= 2) {
           const compareLogPath = join(wsPath, "frames", String(frameIndex), "compare-log.json");
           if (existsSync(compareLogPath)) {
             try {
               const logEntries = JSON.parse(await readFile(compareLogPath, "utf-8"));
               if (Array.isArray(logEntries) && logEntries.length > 0) {
+                // Immediate regression vs previous iteration (unchanged behaviour)
                 const prevParity = logEntries[logEntries.length - 1]?.parity ?? 0;
                 const currentParity = result.parityScore ?? 0;
                 if (currentParity < prevParity - 3) {
                   lines.push(``);
-                  lines.push(`REGRESSION: ${prevParity.toFixed(1)}% -> ${currentParity.toFixed(1)}%. Latest changes made things worse.`);
+                  lines.push(`REGRESSION: ${prevParity.toFixed(1)}% → ${currentParity.toFixed(1)}%. Latest changes made things worse.`);
+                }
+
+                // Stall detection (iteration 4+). If parity has been flat
+                // across the last 3 iterations AND topIssue is alternating
+                // between 2+ categories, the agent is chasing a moving target.
+                // Common cause: a broken image rendering as grey fallback
+                // produces wrong_fill_color → chase colors → break something
+                // else that flips topIssue → chase that → flip back.
+                if (iterationCount >= 4 && logEntries.length >= 3) {
+                  const recent = logEntries.slice(-3); // iters N-3, N-2, N-1
+                  const parities: number[] = recent
+                    .map((e: any) => (typeof e.parity === "number" ? e.parity : null))
+                    .filter((p: number | null): p is number => p != null);
+                  const topIssues = new Set(
+                    recent
+                      .map((e: any) => (typeof e.topIssue === "string" ? e.topIssue : null))
+                      .filter((t: string | null): t is string => !!t),
+                  );
+                  // Include the current iteration's topIssue too.
+                  if (result.topIssue) topIssues.add(result.topIssue as string);
+                  const maxParity = parities.length > 0 ? Math.max(...parities, currentParity) : currentParity;
+                  const minParity = parities.length > 0 ? Math.min(...parities, currentParity) : currentParity;
+                  const flatSpread = maxParity - minParity < 0.5;
+                  if (flatSpread && topIssues.size >= 2) {
+                    lines.push(``);
+                    lines.push(`STALL DETECTED — parity flat across iterations ${iterationCount - 2}..${iterationCount} (spread ${(maxParity - minParity).toFixed(2)}pp) and topIssue cycling between [${[...topIssues].join(", ")}].`);
+                    lines.push(`The current approach is not converging. Stop iterating and do one of:`);
+                    lines.push(`  • Accept the current state and submit (check the Target / Delta block above — if delta is within tolerance the gate will pass).`);
+                    lines.push(`  • Revert the last 1-2 edits and try a different structural change.`);
+                    lines.push(`  • If topIssue includes wrong_color or wrong_fill_color, check for a MISSING IMAGE: rendered #f0f0f0 grey on an image-fill node means a data-image-ref didn't resolve. CSS colour edits cannot fix a missing image — verify the image path in cleaned.html and that the asset exists in frames/${frameIndex}/images/.`);
+                    lines.push(`  • Save what you learned via save_frame_note so the next iteration/agent doesn't re-discover it.`);
+                  }
                 }
               }
             } catch { /* non-critical */ }
@@ -714,6 +874,23 @@ export async function startMcpServer(): Promise<void> {
         if (strips.length > 0) {
           const dirty = strips.filter((s) => s.hasDiff);
           const totalDiff = dirty.reduce((sum, s) => sum + (s.diffPixels ?? 0), 0);
+          // Payload stop-loss. The subagent API caps a single request at 32 MB
+          // and accumulates each compare's base64 images into the same session
+          // context. Unbounded, 15-25 iterations blow the cap. Strategy:
+          //   • Hard cap on dirty strips per response (keep biggest N).
+          //   • After iter 8, drop figma/cleaned strips (keep diff only) —
+          //     agent already knows the design by then; the diff shows the
+          //     remaining work.
+          //   • After iter 15, drop strip images entirely — text-only map.
+          const MAX_DIRTY_STRIPS = 4;
+          const DROP_FIGMA_CLEANED_AFTER = 8;
+          const DROP_IMAGES_AFTER = 15;
+          const sendImages = iterationCount <= DROP_IMAGES_AFTER;
+          const sendFigmaCleaned = iterationCount <= DROP_FIGMA_CLEANED_AFTER;
+          const dirtySorted = [...dirty].sort((a, b) => (b.diffPixels ?? 0) - (a.diffPixels ?? 0));
+          const dirtyShown = dirtySorted.slice(0, MAX_DIRTY_STRIPS).sort((a, b) => a.index - b.index);
+          const dirtyDeferred = dirtySorted.slice(MAX_DIRTY_STRIPS);
+
           const navLines = [
             `Strip map — ${strips.length} strips × ${result.stripHeight ?? "?"} px, ${dirty.length} with diffs (${totalDiff.toLocaleString()} diff pixels total):`,
           ];
@@ -721,9 +898,23 @@ export async function startMcpServer(): Promise<void> {
             const marker = s.hasDiff ? "X" : ".";
             navLines.push(`  [${marker}] Strip ${s.index} — y=${s.yStart}..${s.yEnd}${s.hasDiff ? ` (${(s.diffPixels ?? 0).toLocaleString()} diff px)` : ""}`);
           }
+          if (!sendImages) {
+            navLines.push(``);
+            navLines.push(`Iteration ${iterationCount} > ${DROP_IMAGES_AFTER}: strip images omitted to stay under the request payload budget. Use \`sync_frame\` to pull any strip you need to inspect, or call save_frame_note to wrap up and submit.`);
+          } else if (dirtyDeferred.length > 0) {
+            navLines.push(``);
+            navLines.push(`${dirtyDeferred.length} lower-impact dirty strip(s) omitted from this response (kept the ${MAX_DIRTY_STRIPS} biggest):`);
+            for (const s of dirtyDeferred) {
+              navLines.push(`  Strip ${s.index} y=${s.yStart}..${s.yEnd} (${(s.diffPixels ?? 0).toLocaleString()} diff px) — fetch via sync_frame if needed`);
+            }
+          }
+          if (sendImages && !sendFigmaCleaned) {
+            navLines.push(``);
+            navLines.push(`Iteration ${iterationCount} > ${DROP_FIGMA_CLEANED_AFTER}: figma + cleaned strip images omitted (diff-only mode) to preserve payload budget. The diff alone shows the remaining work.`);
+          }
           content.push({ type: "text", text: navLines.join("\n") });
 
-          if (result.overviewName) {
+          if (sendImages && result.overviewName) {
             await fetchAndInline(
               "OVERVIEW (scaled-down diff for navigation — red=layout, blue=font, green=image, yellow=vector, purple=shadow):",
               result.overviewName,
@@ -731,30 +922,32 @@ export async function startMcpServer(): Promise<void> {
             );
           }
 
-          // Full-resolution strips for each dirty band, in frame order.
-          for (const s of dirty) {
-            const heading = `--- Strip ${s.index} (y=${s.yStart}..${s.yEnd}) ---`;
-            content.push({ type: "text", text: heading });
-            if (s.figmaName) {
-              await fetchAndInline(
-                `FIGMA reference, y=${s.yStart}..${s.yEnd}:`,
-                s.figmaName,
-                `/api/jobs/${jobId}/frames/${frameIndex}/artifact/${s.figmaName}`,
-              );
-            }
-            if (s.cleanedName) {
-              await fetchAndInline(
-                `YOUR RENDER, y=${s.yStart}..${s.yEnd}:`,
-                s.cleanedName,
-                `/api/jobs/${jobId}/frames/${frameIndex}/artifact/${s.cleanedName}`,
-              );
-            }
-            if (s.diffName) {
-              await fetchAndInline(
-                `DIFF (color-coded), y=${s.yStart}..${s.yEnd}:`,
-                s.diffName,
-                `/api/jobs/${jobId}/frames/${frameIndex}/artifact/${s.diffName}`,
-              );
+          // Full-resolution strips for each dirty band, in frame order, capped.
+          if (sendImages) {
+            for (const s of dirtyShown) {
+              const heading = `--- Strip ${s.index} (y=${s.yStart}..${s.yEnd}) ---`;
+              content.push({ type: "text", text: heading });
+              if (sendFigmaCleaned && s.figmaName) {
+                await fetchAndInline(
+                  `FIGMA reference, y=${s.yStart}..${s.yEnd}:`,
+                  s.figmaName,
+                  `/api/jobs/${jobId}/frames/${frameIndex}/artifact/${s.figmaName}`,
+                );
+              }
+              if (sendFigmaCleaned && s.cleanedName) {
+                await fetchAndInline(
+                  `YOUR RENDER, y=${s.yStart}..${s.yEnd}:`,
+                  s.cleanedName,
+                  `/api/jobs/${jobId}/frames/${frameIndex}/artifact/${s.cleanedName}`,
+                );
+              }
+              if (s.diffName) {
+                await fetchAndInline(
+                  `DIFF (color-coded), y=${s.yStart}..${s.yEnd}:`,
+                  s.diffName,
+                  `/api/jobs/${jobId}/frames/${frameIndex}/artifact/${s.diffName}`,
+                );
+              }
             }
           }
 

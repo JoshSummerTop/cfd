@@ -31,9 +31,13 @@ export interface ParityRegressionCheck {
   // status === "no_compare": the user never ran `compare` on this frame, so we can't decide.
   // status === "no_baseline": job.json lacks a parityScore for this frame (pipeline never measured).
   status: "ok" | "regressed" | "no_compare" | "no_baseline";
-  baseline?: number;  // ai-ready/rendered.html parity from job.json
-  current?: number;   // most recent compare-log.json parity
+  baseline?: number;  // ai-ready/rendered.html parity from job.json (the chosen metric)
+  current?: number;   // most recent compare-log.json parity (the chosen metric)
   delta?: number;     // current - baseline (negative = regression)
+  // metric tells callers WHICH parity number was used for the comparison. "nonFont"
+  // is the agent-addressable metric and the preferred gate; "overall" is the fallback
+  // when non-font parity isn't available (older jobs / basic-parity mode).
+  metric: "nonFont" | "overall";
   message: string;
 }
 
@@ -243,22 +247,37 @@ export async function checkParityRegression(
   if (!existsSync(jobPath)) {
     return {
       status: "no_baseline",
+      metric: "nonFont",
       message: `No job.json at ${jobPath} — run sync first.`,
     };
   }
 
-  // Baseline: engine's own rendered.html parity from the pipeline run.
+  // Baseline + current are read in non-font space when available. Non-font
+  // parity excludes text-category pixels (Chromium-vs-Figma font rendering),
+  // which is engine-inherent and NOT something cleaning agents can improve by
+  // editing HTML. Gating on overall parity blocks submissions for noise the
+  // agent cannot fix. Falls back to overall parityScore only if nonFontParity
+  // is missing (older jobs or basic-parity path).
   let baseline: number | undefined;
+  let metric: "nonFont" | "overall" = "nonFont";
   try {
     const job = JSON.parse(await readFile(jobPath, "utf-8"));
-    const frames: Array<{ parityScore?: number | null }> = Array.isArray(job.frames) ? job.frames : [];
+    const frames: Array<{ parityScore?: number | null; nonFontParity?: number | null }> =
+      Array.isArray(job.frames) ? job.frames : [];
     const frame = frames[frameIndex];
-    if (frame && typeof frame.parityScore === "number") {
-      baseline = frame.parityScore;
+    if (frame) {
+      if (typeof frame.nonFontParity === "number") {
+        baseline = frame.nonFontParity;
+        metric = "nonFont";
+      } else if (typeof frame.parityScore === "number") {
+        baseline = frame.parityScore;
+        metric = "overall";
+      }
     }
   } catch (err: any) {
     return {
       status: "no_baseline",
+      metric: "nonFont",
       message: `Failed to parse job.json: ${err.message}`,
     };
   }
@@ -266,17 +285,21 @@ export async function checkParityRegression(
   if (baseline == null) {
     return {
       status: "no_baseline",
-      message: `No parityScore on frame ${frameIndex} in job.json. Pipeline may not have measured parity — gate cannot block.`,
+      metric: "nonFont",
+      message: `No parity score on frame ${frameIndex} in job.json. Pipeline may not have measured parity — gate cannot block.`,
     };
   }
 
-  // Current: most recent compare-log.json entry.
+  // Current: most recent compare-log.json entry. Read the nonFontParity field
+  // (added in engine commit that ships this change); fall back to overall
+  // `parity` for older logs so we don't false-block on a re-install.
   const logPath = join(workspacePath, "frames", String(frameIndex), "compare-log.json");
   if (!existsSync(logPath)) {
     return {
       status: "no_compare",
       baseline,
-      message: `No compare-log.json for frame ${frameIndex}. Run compare at least once before submitting so parity can be measured against the baseline (${baseline.toFixed(1)}%).`,
+      metric,
+      message: `No compare-log.json for frame ${frameIndex}. Run compare at least once before submitting so ${metric === "nonFont" ? "non-font " : ""}parity can be measured against the baseline (${baseline.toFixed(1)}%).`,
     };
   }
 
@@ -285,8 +308,15 @@ export async function checkParityRegression(
     const entries = JSON.parse(await readFile(logPath, "utf-8"));
     if (Array.isArray(entries) && entries.length > 0) {
       const last = entries[entries.length - 1];
-      if (typeof last.parity === "number") {
+      if (metric === "nonFont" && typeof last.nonFontParity === "number") {
+        current = last.nonFontParity;
+      } else if (typeof last.parity === "number") {
+        // Fallback: compare-log was written by an engine that didn't persist
+        // nonFontParity yet. Use overall parity but stay on the non-font
+        // baseline is an apples-to-oranges mismatch, so degrade gracefully
+        // by switching metric to overall for this check.
         current = last.parity;
+        metric = "overall";
       }
     }
   } catch {
@@ -294,6 +324,7 @@ export async function checkParityRegression(
     return {
       status: "no_compare",
       baseline,
+      metric,
       message: `compare-log.json for frame ${frameIndex} is unreadable. Re-run compare before submitting.`,
     };
   }
@@ -302,10 +333,12 @@ export async function checkParityRegression(
     return {
       status: "no_compare",
       baseline,
+      metric,
       message: `compare-log.json exists but has no entries. Run compare on frame ${frameIndex} before submitting.`,
     };
   }
 
+  const metricLabel = metric === "nonFont" ? "non-font parity" : "parity";
   const delta = current - baseline;
   if (delta < -tolerance) {
     return {
@@ -313,9 +346,10 @@ export async function checkParityRegression(
       baseline,
       current,
       delta,
+      metric,
       message:
-        `Parity regressed vs ai-ready baseline: ` +
-        `${current.toFixed(1)}% < ${baseline.toFixed(1)}% - ${tolerance.toFixed(1)}% tolerance ` +
+        `${metricLabel[0].toUpperCase() + metricLabel.slice(1)} regressed vs ai-ready baseline: ` +
+        `${current.toFixed(1)}% < ${baseline.toFixed(1)}% − ${tolerance.toFixed(1)}% tolerance ` +
         `(delta ${delta.toFixed(1)}pp).`,
     };
   }
@@ -325,7 +359,8 @@ export async function checkParityRegression(
     baseline,
     current,
     delta,
-    message: `Parity within tolerance: ${current.toFixed(1)}% vs baseline ${baseline.toFixed(1)}% (delta ${delta >= 0 ? "+" : ""}${delta.toFixed(1)}pp).`,
+    metric,
+    message: `${metricLabel[0].toUpperCase() + metricLabel.slice(1)} within tolerance: ${current.toFixed(1)}% vs baseline ${baseline.toFixed(1)}% (delta ${delta >= 0 ? "+" : ""}${delta.toFixed(1)}pp).`,
   };
 }
 
