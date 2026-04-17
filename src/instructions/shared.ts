@@ -38,7 +38,26 @@ The diff images use color-coded pixels to show what type of mismatch exists:
 | **Yellow** | Vector/Icon | Missing SVGs, wrong colors, wrong size |
 | **Purple** | Shadow | Box-shadow, blur, drop shadows |
 
-The **non-font parity** score is the primary metric (excludes font rendering differences between OSes).`;
+The **non-font parity** score is the primary metric (excludes font rendering differences between OSes).
+
+## Compare Response Layout — Strips
+
+Tall frames (often 6,000-12,000 px) can't be sent as one full-resolution image
+without exhausting the subagent image budget. \`compare\` returns:
+
+1. A **strip map** — a text grid of every vertical strip in the frame, marked
+   \`[X]\` (has diffs) or \`[.]\` (clean). Each strip is 1,500 px tall.
+2. A small **overview** of the full diff image (navigation aid only — low
+   resolution, use for seeing where diffs cluster, not for inspecting detail).
+3. For each dirty strip, **three full-resolution crops** labeled with the
+   y-range: the Figma reference, your render, and the color-coded diff.
+
+Work strip-by-strip in y-order. Use the strip map to budget your attention —
+strips marked \`[.]\` already match; don't chase them. Strips with the highest
+diff-pixel counts are where your effort pays off most.
+
+Clean strips are *not* streamed as images, so multi-iteration sessions on a
+tall frame keep running instead of dying mid-fix.`;
 
 export const IMAGES_AND_SVGS = `## Images and SVGs
 

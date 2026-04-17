@@ -98,13 +98,28 @@ If parity DROPS on iteration 2+, your changes made things worse. Revert and try 
 
 ## What Gets Blocked at Submission
 
-\`submit_cleaned_frame\` and \`validate\` check structural quality. Submission is REFUSED if:
+\`submit_cleaned_frame\` runs TWO gates, both of which can refuse the submission.
+
+**Gate 1 — Structural quality** (same checks as the \`validate\` tool):
 - Raw Figma positioning (many elements with position:absolute + large px coordinates like top:200px;left:500px)
 - No semantic elements (header, main, section, footer)
 - No display:flex or display:grid in CSS
 - Fixed viewport width (1440px or 1920px on body/wrapper)
 - More than 30 inline style="" attributes
 - Localhost or engine API URLs
+
+**Gate 2 — Parity non-regression:**
+- Reads the baseline from \`job.json\` (engine's rendered.html parity against Figma).
+- Reads the latest compare from \`compare-log.json\`.
+- Blocks if latest cleaned parity < baseline - 2pp tolerance.
+- Blocks if no compare has been run yet (so there's no data to gate against). Run \`compare\` before submitting.
+- The gate is for catching regressions caused by layout mistakes — not for punishing iteration speed. Iterate with \`compare\` until the score at least matches the baseline, then submit.
+
+**Override (use sparingly, document why):** if a regression is intentional — e.g. a decorative region was deliberately simplified, or the cleaned layout is intentionally more responsive in ways the fixed-viewport Figma render can't represent — call:
+\`\`\`
+submit_cleaned_frame({ jobId, frameIndex, force: true, forceReason: "short explanation" })
+\`\`\`
+Overrides are logged. Do not use this to avoid fixing a real regression.
 
 ## Do Not
 

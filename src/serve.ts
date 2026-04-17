@@ -9,7 +9,7 @@ import { engineFetch } from "./engine.js";
 import { syncJob, syncFrame, getWorkspacePath, getFrameCleanStatus } from "./sync.js";
 import { submitFrame, buildWebsite, uploadWebsite } from "./submit.js";
 import { HANDSHAKE_INSTRUCTIONS, CLEAN_FRAMES_INSTRUCTIONS, BUILD_WEBSITE_INSTRUCTIONS } from "./instructions/index.js";
-import { validateForSubmission, containsLoopbackUrls } from "./validate.js";
+import { validateForSubmission, containsLoopbackUrls, checkParityRegression } from "./validate.js";
 
 // Recursively walk a directory — cross-platform, works on all Node 18+ versions
 async function walkWebsiteDir(dir: string): Promise<string[]> {
@@ -31,7 +31,7 @@ export async function startMcpServer(): Promise<void> {
   const config = await loadConfig();
 
   const server = new McpServer(
-    { name: "cfd", version: "0.8.1" },
+    { name: "cfd", version: "0.9.1" },
     { instructions: HANDSHAKE_INSTRUCTIONS },
   );
 
@@ -196,12 +196,14 @@ export async function startMcpServer(): Promise<void> {
   // --- Tool: submit_cleaned_frame ---
   server.tool(
     "submit_cleaned_frame",
-    "Submit production-quality cleaned HTML for a frame. BLOCKS submission if HTML fails structural quality checks (no semantic elements, mass absolute positioning, inline styles, missing flexbox/grid). Write proper production code before calling this.",
+    "Submit production-quality cleaned HTML for a frame. BLOCKS submission if (a) HTML fails structural quality checks, or (b) the most recent compare parity regressed below the ai-ready baseline. Run compare before submitting so the parity gate has data. Pass force:true with forceReason to override the parity gate when the regression is intentional (e.g. content deliberately restructured).",
     {
       jobId: z.string().describe("The job ID"),
       frameIndex: z.number().describe("The frame index (0-based)"),
+      force: z.boolean().optional().describe("Override the parity-regression gate. Only use when the regression is intentional and explicable — requires forceReason."),
+      forceReason: z.string().optional().describe("Required when force:true. Explain why the regression is acceptable (e.g. 'intentionally removed empty decorative region')."),
     },
-    async ({ jobId, frameIndex }) => {
+    async ({ jobId, frameIndex, force, forceReason }) => {
       try {
         const wsPath = getWorkspacePath(jobId);
         const cleanedPath = join(wsPath, "frames", String(frameIndex), "cleaned.html");
@@ -229,6 +231,48 @@ export async function startMcpServer(): Promise<void> {
           return { content: [{ type: "text", text: lines.join("\n") }] };
         }
 
+        // --- Parity-regression gate — BLOCKS if cleaned compare trails ai-ready baseline ---
+        // Structure can be perfect while the output has regressed visually. The gate
+        // reads job.json (baseline = rendered.html parity) and compare-log.json
+        // (latest cleaned.html parity) and refuses submissions that trail the
+        // baseline beyond PARITY_REGRESSION_TOLERANCE.
+        const parity = await checkParityRegression(wsPath, jobId, frameIndex);
+        if (parity.status === "regressed" && force !== true) {
+          const baselineStr = parity.baseline?.toFixed(1) ?? "?";
+          const currentStr = parity.current?.toFixed(1) ?? "?";
+          const deltaStr = parity.delta != null ? `${parity.delta >= 0 ? "+" : ""}${parity.delta.toFixed(1)}pp` : "?";
+          return {
+            content: [{
+              type: "text",
+              text: [
+                `SUBMISSION BLOCKED — parity regression vs ai-ready baseline.`,
+                ``,
+                `  Baseline (engine render):  ${baselineStr}%`,
+                `  Latest cleaned compare:    ${currentStr}%`,
+                `  Delta:                     ${deltaStr}`,
+                ``,
+                `Iterate on cleaned.html and re-run compare until parity at least matches the baseline.`,
+                `Work strip-by-strip from the compare response — clean strips already match; spend effort on dirty ones.`,
+                ``,
+                `If this regression is intentional (e.g. decorative region deliberately removed), override with:`,
+                `  submit_cleaned_frame({ jobId, frameIndex, force: true, forceReason: "…" })`,
+              ].join("\n"),
+            }],
+          };
+        }
+        if (parity.status === "no_compare" && force !== true) {
+          return {
+            content: [{
+              type: "text",
+              text: [
+                `SUBMISSION BLOCKED — ${parity.message}`,
+                ``,
+                `Run compare first so the gate can check for regression. If you truly must submit without a compare pass (rare), override with force:true + forceReason.`,
+              ].join("\n"),
+            }],
+          };
+        }
+
         // Passed gate — submit to engine
         const result = await submitFrame(config, jobId, frameIndex);
 
@@ -240,6 +284,18 @@ export async function startMcpServer(): Promise<void> {
         const lines: string[] = [];
         if (submission.warnings.length > 0) {
           lines.push(`Warnings (non-blocking):`, ...submission.warnings.map(w => `  ${w}`), ``);
+        }
+        // Surface parity gate outcome so agents (and humans reading logs) see it.
+        if (parity.status === "ok") {
+          lines.push(`Parity gate: ${parity.message}`);
+        } else if (parity.status === "regressed" && force === true) {
+          const reason = forceReason && forceReason.trim().length > 0 ? forceReason : "(no reason given)";
+          lines.push(`Parity gate OVERRIDDEN (force:true): ${parity.message}`);
+          lines.push(`Override reason: ${reason}`);
+        } else if (parity.status === "no_compare" && force === true) {
+          lines.push(`Parity gate SKIPPED (force:true, no compare data): submitting without parity check.`);
+        } else if (parity.status === "no_baseline") {
+          lines.push(`Parity gate: ${parity.message}`);
         }
         lines.push(result);
 
@@ -579,6 +635,26 @@ export async function startMcpServer(): Promise<void> {
         }
         lines.push(`Duration: ${result.durationMs}ms`);
 
+        // Actionable breakdown — these replace the need to fetch and read
+        // cleaned-issue-diff.json for most iteration work.
+        if (Array.isArray(result.topRankedIssues) && result.topRankedIssues.length > 0) {
+          lines.push(``);
+          lines.push(`Top issues by pixel impact:`);
+          for (const r of result.topRankedIssues) {
+            const tag = r.fixable ? "fixable" : "engine-inherent";
+            lines.push(`  ${r.name.padEnd(20)} ${(r.diffPixels ?? 0).toLocaleString().padStart(10)} px  ${(r.percentage ?? 0).toFixed(1).padStart(5)}%  ${tag}`);
+          }
+        }
+        if (Array.isArray(result.topFailingNodes) && result.topFailingNodes.length > 0) {
+          lines.push(``);
+          lines.push(`Top failing nodes (addressable in cleaned.html):`);
+          for (const n of result.topFailingNodes) {
+            const tag = n.fixable ? "fixable" : "engine-inherent";
+            const name = (n.nodeName && n.nodeName.length > 0) ? n.nodeName : "(unnamed)";
+            lines.push(`  ${String(n.nodeId).padEnd(10)} ${String(n.failureType).padEnd(26)} ${(n.diffPixels ?? 0).toLocaleString().padStart(10)} px  parity=${(n.parity ?? 0).toFixed(1)}%  ${tag}  — ${name}`);
+          }
+        }
+
         // Parity regression detection (iteration 2+) — this is actionable data, not a warning
         if (iterationCount >= 2) {
           const compareLogPath = join(wsPath, "frames", String(frameIndex), "compare-log.json");
@@ -601,34 +677,102 @@ export async function startMcpServer(): Promise<void> {
         const content: Array<{ type: "text"; text: string } | { type: "image"; data: string; mimeType: string }> = [];
         content.push({ type: "text", text: lines.join("\n") });
 
-        // Fetch diff and screenshot images inline — eliminates need for separate sync call
-        const inlineImages: Array<{ label: string; name: string; endpoint: string }> = [
-          { label: "DIFF IMAGE (color-coded: red=layout, blue=font, green=image, yellow=vector, purple=shadow):",
-            name: "cleaned-diff.png",
-            endpoint: `/api/jobs/${jobId}/frames/${frameIndex}/cleaned-diff` },
-          { label: "YOUR RENDERED OUTPUT (what your cleaned.html looks like):",
-            name: "cleaned-screenshot.png",
-            endpoint: `/api/jobs/${jobId}/frames/${frameIndex}/cleaned-screenshot` },
-        ];
-
-        for (const img of inlineImages) {
+        // Helper: fetch one artifact PNG, save to workspace, append as inline image.
+        const framesDir = join(wsPath, "frames", String(frameIndex));
+        const fetchAndInline = async (label: string, fileName: string, endpoint: string) => {
           try {
-            const imgRes = await engineFetch(config, img.endpoint);
+            const imgRes = await engineFetch(config, endpoint);
             if (imgRes.ok) {
               const imgData = Buffer.from(await imgRes.arrayBuffer());
-              await writeFile(join(wsPath, "frames", String(frameIndex), img.name), imgData);
-              content.push({ type: "text", text: img.label });
-              content.push({
-                type: "image",
-                data: imgData.toString("base64"),
-                mimeType: "image/png",
-              });
-            } else {
-              content.push({ type: "text", text: `${img.label} [Image unavailable — engine returned ${imgRes.status}]` });
+              await writeFile(join(framesDir, fileName), imgData);
+              content.push({ type: "text", text: label });
+              content.push({ type: "image", data: imgData.toString("base64"), mimeType: "image/png" });
+              return true;
             }
+            content.push({ type: "text", text: `${label} [Image unavailable — engine returned ${imgRes.status}]` });
           } catch (imgErr: any) {
-            content.push({ type: "text", text: `${img.label} [Image unavailable — ${imgErr.message || "fetch failed"}]` });
+            content.push({ type: "text", text: `${label} [Image unavailable — ${imgErr.message || "fetch failed"}]` });
           }
+          return false;
+        };
+
+        // Engine ≥ v0.9 returns strip metadata so we can embed full-resolution
+        // crops of only the regions with diffs. This keeps the subagent's
+        // image budget under the many-image 2000-px cap across many iterations.
+        // Older engines omit `strips` — fall back to the full-frame path.
+        const strips: Array<{
+          index: number;
+          yStart: number;
+          yEnd: number;
+          hasDiff: boolean;
+          diffPixels?: number;
+          figmaName?: string;
+          cleanedName?: string;
+          diffName?: string;
+        }> = Array.isArray(result.strips) ? result.strips : [];
+
+        if (strips.length > 0) {
+          const dirty = strips.filter((s) => s.hasDiff);
+          const totalDiff = dirty.reduce((sum, s) => sum + (s.diffPixels ?? 0), 0);
+          const navLines = [
+            `Strip map — ${strips.length} strips × ${result.stripHeight ?? "?"} px, ${dirty.length} with diffs (${totalDiff.toLocaleString()} diff pixels total):`,
+          ];
+          for (const s of strips) {
+            const marker = s.hasDiff ? "X" : ".";
+            navLines.push(`  [${marker}] Strip ${s.index} — y=${s.yStart}..${s.yEnd}${s.hasDiff ? ` (${(s.diffPixels ?? 0).toLocaleString()} diff px)` : ""}`);
+          }
+          content.push({ type: "text", text: navLines.join("\n") });
+
+          if (result.overviewName) {
+            await fetchAndInline(
+              "OVERVIEW (scaled-down diff for navigation — red=layout, blue=font, green=image, yellow=vector, purple=shadow):",
+              result.overviewName,
+              `/api/jobs/${jobId}/frames/${frameIndex}/artifact/${result.overviewName}`,
+            );
+          }
+
+          // Full-resolution strips for each dirty band, in frame order.
+          for (const s of dirty) {
+            const heading = `--- Strip ${s.index} (y=${s.yStart}..${s.yEnd}) ---`;
+            content.push({ type: "text", text: heading });
+            if (s.figmaName) {
+              await fetchAndInline(
+                `FIGMA reference, y=${s.yStart}..${s.yEnd}:`,
+                s.figmaName,
+                `/api/jobs/${jobId}/frames/${frameIndex}/artifact/${s.figmaName}`,
+              );
+            }
+            if (s.cleanedName) {
+              await fetchAndInline(
+                `YOUR RENDER, y=${s.yStart}..${s.yEnd}:`,
+                s.cleanedName,
+                `/api/jobs/${jobId}/frames/${frameIndex}/artifact/${s.cleanedName}`,
+              );
+            }
+            if (s.diffName) {
+              await fetchAndInline(
+                `DIFF (color-coded), y=${s.yStart}..${s.yEnd}:`,
+                s.diffName,
+                `/api/jobs/${jobId}/frames/${frameIndex}/artifact/${s.diffName}`,
+              );
+            }
+          }
+
+          if (dirty.length === 0) {
+            content.push({ type: "text", text: "No strips exceeded the diff threshold — the compare pass found no meaningful differences. If parity is still low, verify the Figma reference is correct." });
+          }
+        } else {
+          // Legacy path — full-frame PNGs. Kept for older engines.
+          await fetchAndInline(
+            "DIFF IMAGE (color-coded: red=layout, blue=font, green=image, yellow=vector, purple=shadow):",
+            "cleaned-diff.png",
+            `/api/jobs/${jobId}/frames/${frameIndex}/cleaned-diff`,
+          );
+          await fetchAndInline(
+            "YOUR RENDERED OUTPUT (what your cleaned.html looks like):",
+            "cleaned-screenshot.png",
+            `/api/jobs/${jobId}/frames/${frameIndex}/cleaned-screenshot`,
+          );
         }
 
         // Update local compare-log.json from engine

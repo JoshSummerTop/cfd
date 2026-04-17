@@ -6,7 +6,14 @@
  */
 
 import { existsSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { join } from "node:path";
+
+// How many percentage points a cleaned compare may trail the ai-ready
+// baseline before the submit gate refuses the submission. Covers Chromium
+// run-to-run nondeterminism and minor rendering noise without letting real
+// regressions through.
+export const PARITY_REGRESSION_TOLERANCE = 2.0;
 
 // ---------------------------------------------------------------------------
 // Result types
@@ -16,6 +23,18 @@ export interface SubmissionValidationResult {
   pass: boolean;
   errors: string[];   // blocking — submission refused
   warnings: string[]; // advisory — submission allowed
+}
+
+export interface ParityRegressionCheck {
+  // status === "ok": submission safe on parity grounds (may still be gated by force override below).
+  // status === "regressed": submission currently scores below baseline - tolerance.
+  // status === "no_compare": the user never ran `compare` on this frame, so we can't decide.
+  // status === "no_baseline": job.json lacks a parityScore for this frame (pipeline never measured).
+  status: "ok" | "regressed" | "no_compare" | "no_baseline";
+  baseline?: number;  // ai-ready/rendered.html parity from job.json
+  current?: number;   // most recent compare-log.json parity
+  delta?: number;     // current - baseline (negative = regression)
+  message: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -193,6 +212,120 @@ export function validateForSubmission(
     pass: errors.length === 0,
     errors,
     warnings,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Parity-regression gate
+// ---------------------------------------------------------------------------
+
+/**
+ * Compare the most recent compare-log.json parity against the frame's
+ * ai-ready.html baseline (job.json frame.parityScore — the parity the engine's
+ * own rendered.html scored against the Figma reference).
+ *
+ * Why ai-ready rather than the previous submit: if the agent's first clean
+ * regresses below ai-ready by 30 points and then climbs back to ai-ready - 20,
+ * a previous-submit gate would accept the second submit. An ai-ready gate
+ * requires each submission to at least match the engine's own rendering.
+ *
+ * This is the check Phase 1 diagnostic confirmed is safe — the score is an
+ * honest proxy for visual parity, so blocking on a real regression blocks a
+ * real visual regression.
+ */
+export async function checkParityRegression(
+  workspacePath: string,
+  jobId: string,
+  frameIndex: number,
+  tolerance = PARITY_REGRESSION_TOLERANCE,
+): Promise<ParityRegressionCheck> {
+  const jobPath = join(workspacePath, "job.json");
+  if (!existsSync(jobPath)) {
+    return {
+      status: "no_baseline",
+      message: `No job.json at ${jobPath} — run sync first.`,
+    };
+  }
+
+  // Baseline: engine's own rendered.html parity from the pipeline run.
+  let baseline: number | undefined;
+  try {
+    const job = JSON.parse(await readFile(jobPath, "utf-8"));
+    const frames: Array<{ parityScore?: number | null }> = Array.isArray(job.frames) ? job.frames : [];
+    const frame = frames[frameIndex];
+    if (frame && typeof frame.parityScore === "number") {
+      baseline = frame.parityScore;
+    }
+  } catch (err: any) {
+    return {
+      status: "no_baseline",
+      message: `Failed to parse job.json: ${err.message}`,
+    };
+  }
+
+  if (baseline == null) {
+    return {
+      status: "no_baseline",
+      message: `No parityScore on frame ${frameIndex} in job.json. Pipeline may not have measured parity — gate cannot block.`,
+    };
+  }
+
+  // Current: most recent compare-log.json entry.
+  const logPath = join(workspacePath, "frames", String(frameIndex), "compare-log.json");
+  if (!existsSync(logPath)) {
+    return {
+      status: "no_compare",
+      baseline,
+      message: `No compare-log.json for frame ${frameIndex}. Run compare at least once before submitting so parity can be measured against the baseline (${baseline.toFixed(1)}%).`,
+    };
+  }
+
+  let current: number | undefined;
+  try {
+    const entries = JSON.parse(await readFile(logPath, "utf-8"));
+    if (Array.isArray(entries) && entries.length > 0) {
+      const last = entries[entries.length - 1];
+      if (typeof last.parity === "number") {
+        current = last.parity;
+      }
+    }
+  } catch {
+    // Treat a corrupt log the same as a missing log: user needs to re-compare.
+    return {
+      status: "no_compare",
+      baseline,
+      message: `compare-log.json for frame ${frameIndex} is unreadable. Re-run compare before submitting.`,
+    };
+  }
+
+  if (current == null) {
+    return {
+      status: "no_compare",
+      baseline,
+      message: `compare-log.json exists but has no entries. Run compare on frame ${frameIndex} before submitting.`,
+    };
+  }
+
+  const delta = current - baseline;
+  if (delta < -tolerance) {
+    return {
+      status: "regressed",
+      baseline,
+      current,
+      delta,
+      message:
+        `Parity regressed vs ai-ready baseline: ` +
+        `${current.toFixed(1)}% < ${baseline.toFixed(1)}% - ${tolerance.toFixed(1)}% tolerance ` +
+        `(delta ${delta.toFixed(1)}pp).`,
+    };
+  }
+
+  return {
+    status: "ok",
+    baseline,
+    current,
+    delta,
+    message: `Parity within tolerance: ${current.toFixed(1)}% vs baseline ${baseline.toFixed(1)}% (delta ${delta >= 0 ? "+" : ""}${delta.toFixed(1)}pp).`,
   };
 }
 
