@@ -31,7 +31,7 @@ export async function startMcpServer(): Promise<void> {
   const config = await loadConfig();
 
   const server = new McpServer(
-    { name: "cfd", version: "0.7.1" },
+    { name: "cfd", version: "0.8.0" },
     { instructions: HANDSHAKE_INSTRUCTIONS },
   );
 
@@ -655,59 +655,46 @@ export async function startMcpServer(): Promise<void> {
       jobId: z.string().describe("The job ID"),
     },
     async ({ jobId }) => {
-      const snipsDir = join(getWorkspacePath(jobId), "snips");
-      if (!existsSync(snipsDir)) {
-        return { content: [{ type: "text", text: "No snips found. The user can create snips using the snip tool in the CodeFromDesign web app." }] };
-      }
-
       try {
-        const files = await readdir(snipsDir);
-        const jsonFiles = files.filter((f) => f.endsWith(".json")).sort().reverse();
+        const res = await engineFetch(config, `/api/jobs/${jobId}/snips`);
+        if (!res.ok) {
+          return { content: [{ type: "text", text: "No snips found. The user can create snips using the snip tool in the CodeFromDesign web app." }] };
+        }
 
-        if (jsonFiles.length === 0) {
+        const entries: Array<{ snipName: string; metadata: Record<string, unknown>; imageBase64?: string }> = await res.json();
+
+        if (entries.length === 0) {
           return { content: [{ type: "text", text: "No snips found." }] };
         }
 
-        // Build content array with text metadata + inline images
         const content: Array<{ type: "text"; text: string } | { type: "image"; data: string; mimeType: string }> = [];
+        content.push({ type: "text", text: `Found ${entries.length} snip(s) for job ${jobId}:\n` });
 
-        content.push({ type: "text", text: `Found ${jsonFiles.length} snip(s) for job ${jobId}:\n` });
-
-        for (const file of jsonFiles) {
-          try {
-            const raw = await readFile(join(snipsDir, file), "utf-8");
-            const snip = JSON.parse(raw);
-
-            // Add metadata as text
-            const lines: string[] = [`--- Snip (${new Date(snip.timestamp).toISOString()}) ---`];
-            for (const [key, val] of Object.entries(snip)) {
-              if (key !== "timestamp") {
-                lines.push(`  ${key}: ${val}`);
-              }
+        for (const entry of entries) {
+          const meta = entry.metadata;
+          const lines: string[] = [`--- Snip ${entry.snipName} (${meta.timestamp ? new Date(meta.timestamp as number).toISOString() : "unknown"}) ---`];
+          for (const [key, val] of Object.entries(meta)) {
+            if (key !== "timestamp" && key !== "snipName") {
+              lines.push(`  ${key}: ${val}`);
             }
-            content.push({ type: "text", text: lines.join("\n") });
-
-            // Add the cropped image inline if it exists
-            if (snip.imagePath && existsSync(snip.imagePath)) {
-              const imgData = await readFile(snip.imagePath);
-              content.push({
-                type: "image",
-                data: imgData.toString("base64"),
-                mimeType: "image/png",
-              });
-            }
-
-            content.push({ type: "text", text: "" });
-          } catch {
-            // skip malformed files
           }
+          content.push({ type: "text", text: lines.join("\n") });
+
+          if (entry.imageBase64) {
+            content.push({
+              type: "image",
+              data: entry.imageBase64,
+              mimeType: "image/png",
+            });
+          }
+
+          content.push({ type: "text", text: "" });
         }
 
         content.push({ type: "text", text: "Address these snips — they are user-reported issues that take priority." });
-
         return { content };
       } catch (err: any) {
-        return { content: [{ type: "text", text: `Failed to read snips: ${err.message}` }] };
+        return { content: [{ type: "text", text: `Failed to fetch snips: ${err.message}` }] };
       }
     }
   );
@@ -720,13 +707,12 @@ export async function startMcpServer(): Promise<void> {
       jobId: z.string().describe("The job ID"),
     },
     async ({ jobId }) => {
-      const snipsDir = join(getWorkspacePath(jobId), "snips");
-      if (!existsSync(snipsDir)) {
-        return { content: [{ type: "text", text: "No snips directory found — nothing to clear." }] };
-      }
-
       try {
-        await rm(snipsDir, { recursive: true });
+        const res = await engineFetch(config, `/api/jobs/${jobId}/snips`, { method: "DELETE" });
+        if (!res.ok) {
+          const errText = await res.text().catch(() => "unknown error");
+          return { content: [{ type: "text", text: `Failed to clear snips: ${errText}` }] };
+        }
         return { content: [{ type: "text", text: `Cleared all snips for job ${jobId}.` }] };
       } catch (err: any) {
         return { content: [{ type: "text", text: `Failed to clear snips: ${err.message}` }] };

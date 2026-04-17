@@ -69,6 +69,58 @@ async function walkDir(dir: string): Promise<string[]> {
   return files;
 }
 
+/** MIME types for the file extensions the engine accepts. Used for the PUT
+ *  Content-Type header on signed URL uploads — Supabase Storage stores what we
+ *  send, and the web app serves it back with the same type. */
+const MIME_BY_EXT: Record<string, string> = {
+  ".html": "text/html; charset=utf-8",
+  ".css": "text/css; charset=utf-8",
+  ".js": "application/javascript; charset=utf-8",
+  ".json": "application/json; charset=utf-8",
+  ".txt": "text/plain; charset=utf-8",
+  ".xml": "application/xml",
+  ".map": "application/json",
+  ".webmanifest": "application/manifest+json",
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".gif": "image/gif",
+  ".svg": "image/svg+xml",
+  ".ico": "image/x-icon",
+  ".webp": "image/webp",
+  ".avif": "image/avif",
+  ".woff": "font/woff",
+  ".woff2": "font/woff2",
+  ".ttf": "font/ttf",
+  ".eot": "application/vnd.ms-fontobject",
+};
+
+function mimeFor(path: string): string {
+  const dot = path.lastIndexOf(".");
+  if (dot < 0) return "application/octet-stream";
+  return MIME_BY_EXT[path.slice(dot).toLowerCase()] ?? "application/octet-stream";
+}
+
+/** Upload a single file to a Supabase signed PUT URL. These URLs live outside
+ *  Render/Next.js, so there is no ~10MB edge-proxy cap on the payload. */
+async function putToSignedUrl(url: string, data: Buffer, contentType: string): Promise<void> {
+  // Cast to BodyInit — Node's undici fetch accepts Buffer/Uint8Array, but the
+  // bundled lib.dom types are stricter than the runtime. Behavior is the same.
+  const res = await fetch(url, {
+    method: "PUT",
+    headers: {
+      "Content-Type": contentType,
+      // Supabase storage requires x-upsert on re-uploads to the same path.
+      "x-upsert": "true",
+    },
+    body: data as unknown as BodyInit,
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new Error(`PUT ${url} → ${res.status}: ${body}`);
+  }
+}
+
 export async function uploadWebsite(
   config: CfdConfig,
   jobId: string,
@@ -78,26 +130,19 @@ export async function uploadWebsite(
     throw new Error(`Directory not found: ${directory}`);
   }
 
-  // Walk the directory and collect all files
   const filePaths = await walkDir(directory);
   if (filePaths.length === 0) {
     throw new Error(`No files found in ${directory}`);
   }
 
-  // Read and base64-encode each file, tracking cumulative payload size
-  const files: { path: string; content: string }[] = [];
+  // Collect relative paths + derive page metadata (same naming scheme as before).
+  const relPaths: string[] = [];
   const htmlPages: { name: string; route: string }[] = [];
-  let totalPayloadBytes = 0;
-  const PAYLOAD_WARNING_BYTES = 400 * 1024 * 1024; // 400MB
-  const PAYLOAD_LIMIT_BYTES = 500 * 1024 * 1024; // 500MB (engine limit is 512MB)
-
+  const absByRel = new Map<string, string>();
   for (const fullPath of filePaths) {
-    const relPath = relative(directory, fullPath).split("\\").join("/"); // normalize to forward slashes
-    const data = await readFile(fullPath);
-    const b64 = data.toString("base64");
-    totalPayloadBytes += b64.length;
-    files.push({ path: relPath, content: b64 });
-
+    const relPath = relative(directory, fullPath).split("\\").join("/");
+    relPaths.push(relPath);
+    absByRel.set(relPath, fullPath);
     if (relPath.endsWith(".html")) {
       const name = relPath === "index.html"
         ? "Home"
@@ -106,32 +151,65 @@ export async function uploadWebsite(
     }
   }
 
-  if (totalPayloadBytes > PAYLOAD_LIMIT_BYTES) {
-    const sizeMB = (totalPayloadBytes / (1024 * 1024)).toFixed(0);
-    throw new Error(
-      `Payload too large (${sizeMB}MB). Engine limit is 512MB. ` +
-      `Optimize images (compress PNGs, convert to WebP) before submitting.`
-    );
-  }
-
-  let sizeWarning = "";
-  if (totalPayloadBytes > PAYLOAD_WARNING_BYTES) {
-    const sizeMB = (totalPayloadBytes / (1024 * 1024)).toFixed(0);
-    sizeWarning = `\u{26A0}\u{FE0F} Large payload: ${sizeMB}MB (engine limit is 512MB). Consider optimizing images.\n`;
-  }
-
-  // Upload to engine
-  const res = await engineFetch(config, `/api/jobs/${jobId}/website/upload`, {
+  // Phase 1: ask engine for a signed upload URL per file. Body here is just
+  // a list of paths — tiny regardless of site size, so it fits under the
+  // Render/Next.js edge proxy's body limit.
+  const urlsRes = await engineFetch(config, `/api/jobs/${jobId}/website/upload-urls`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ files, pages: htmlPages }),
+    body: JSON.stringify({ files: relPaths }),
   });
-
-  if (!res.ok) {
-    const body = await res.text();
-    throw new Error(`Upload failed: ${res.status}: ${body}`);
+  if (!urlsRes.ok) {
+    const body = await urlsRes.text();
+    throw new Error(`Request upload URLs failed: ${urlsRes.status}: ${body}`);
+  }
+  const { uploads } = (await urlsRes.json()) as {
+    uploads: { path: string; url: string; method: string }[];
+  };
+  if (!uploads || uploads.length !== relPaths.length) {
+    throw new Error(`Engine returned ${uploads?.length ?? 0} upload URLs for ${relPaths.length} files`);
   }
 
-  const data = await res.json();
-  return `${sizeWarning}Website uploaded: ${data.files} files, ${data.pages} pages. Build ID: ${data.buildId}. View it in the CodeFromDesign web app.`;
+  // Phase 2: PUT each file directly to Supabase Storage. Parallel, but capped
+  // so we don't open hundreds of sockets on a large site. A PUT failure stops
+  // the whole upload — no partial builds.
+  const CONCURRENCY = 6;
+  let cursor = 0;
+  let uploaded = 0;
+  async function worker() {
+    while (cursor < uploads.length) {
+      const mine = cursor++;
+      const entry = uploads[mine];
+      const abs = absByRel.get(entry.path);
+      if (!abs) throw new Error(`No local file for upload entry ${entry.path}`);
+      const data = await readFile(abs);
+      await putToSignedUrl(entry.url, data, mimeFor(entry.path));
+      uploaded++;
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(CONCURRENCY, uploads.length) }, worker));
+
+  // Phase 3: finalize — engine verifies everything landed in storage and
+  // writes the website_builds row.
+  const finalizeRes = await engineFetch(config, `/api/jobs/${jobId}/website/finalize`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ files: relPaths, pages: htmlPages }),
+  });
+  if (!finalizeRes.ok) {
+    const body = await finalizeRes.text();
+    throw new Error(`Finalize failed: ${finalizeRes.status}: ${body}`);
+  }
+  const data = (await finalizeRes.json()) as {
+    buildId: string;
+    files: number;
+    pages: number;
+    warnings?: { code: string; severity: string; message: string }[];
+  };
+
+  let warningText = "";
+  if (data.warnings?.length) {
+    warningText = data.warnings.map(w => `  ${w.severity.toUpperCase()}: ${w.message}`).join("\n") + "\n";
+  }
+  return `${warningText}Website uploaded: ${data.files} files, ${data.pages} pages. Build ID: ${data.buildId}. View it in the CodeFromDesign web app.`;
 }
