@@ -31,7 +31,7 @@ export async function startMcpServer(): Promise<void> {
   const config = await loadConfig();
 
   const server = new McpServer(
-    { name: "cfd", version: "0.10.1" },
+    { name: "cfd", version: "0.10.2" },
     { instructions: HANDSHAKE_INSTRUCTIONS },
   );
 
@@ -693,12 +693,12 @@ export async function startMcpServer(): Promise<void> {
 
         const html = await readFile(cleanedPath, "utf-8");
 
-        // Hard iteration cap. We've seen agents run 28-33 iterations on a
-        // single frame, plateau, and eventually die to the 32MB request
-        // ceiling. The stall warning + soft guidance weren't closing the loop.
-        // Refuse further compares past this point — the agent must submit (if
-        // the gate passes), restart from ai-ready.html with force, or abandon.
-        const MAX_COMPARE_ITERATIONS = 20;
+        // Hard iteration cap. Raised to 30 after the last successful pass
+        // showed agents can legitimately take a bit longer with the wide
+        // gate. Still a hard ceiling — past 30, the response is essentially
+        // "decide now: submit / note / force-submit" — but comfortable enough
+        // that reasonable work isn't cut short.
+        const MAX_COMPARE_ITERATIONS = 30;
         const compareLogPath = join(wsPath, "frames", String(frameIndex), "compare-log.json");
         let priorIterationCount = 0;
         if (existsSync(compareLogPath)) {
@@ -761,15 +761,29 @@ export async function startMcpServer(): Promise<void> {
           lines.push(`Target (ai-ready):  overall ${fmt(ar).padEnd(7)} non-font ${fmt(arNf)}`);
           lines.push(`You are now:        overall ${fmt(cur).padEnd(7)} non-font ${fmt(curNf)}`);
           if (delta != null) {
-            // Submit gate is deliberately wide (15pp). The band between 0
-            // and -15pp is "ship it" territory. Below -15 or below the
-            // absolute floor of 40% indicates broken HTML and the gate will
-            // block. Show agents where they stand relative to both bands.
+            // The gate is wide (15pp + 40% floor) as a safety net for broken
+            // output — it is NOT a blanket ship-whenever signal. Matching
+            // the baseline is the goal; shipping with a small gap is fine
+            // only when you can't close it quickly. Five bands of messaging:
+            //   ≥ 0        : at or above baseline — ship
+            //   -2..0      : within rendering noise — ship
+            //   -5..-2     : close — fine to ship, or one more iteration to match
+            //   -15..-5    : below baseline — keep working when you see a path
+            //   < -15      : gate will block (output broken, not imperfect)
             const tol = 15.0; // must match validate.ts PARITY_REGRESSION_TOLERANCE
             const sign = delta >= 0 ? "+" : "";
-            let flag = "   ← ship-it range; submit gate will pass";
-            if (delta < -tol) flag = "   ← more than 15pp off; gate will BLOCK (output is broken, not just imperfect)";
-            else if (delta < -5) flag = "   ← off by a few pp; fine to submit once structure is solid";
+            let flag: string;
+            if (delta >= 0) {
+              flag = "   ← at or above baseline — ship";
+            } else if (delta >= -2) {
+              flag = "   ← matches baseline within rendering noise — ship";
+            } else if (delta >= -5) {
+              flag = "   ← close to baseline — fine to ship, or one more iteration to match";
+            } else if (delta >= -tol) {
+              flag = "   ← below baseline — keep working when you see a path; ship if you don't";
+            } else {
+              flag = "   ← more than 15pp off; gate will BLOCK (output is broken, not just imperfect)";
+            }
             lines.push(`Delta vs baseline:  non-font ${sign}${delta.toFixed(1)}pp${flag}`);
           }
         } else {
