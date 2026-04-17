@@ -90,10 +90,11 @@ Write a complete HTML document to \`frames/{index}/cleaned.html\`:
 
 export const SNIPS = `## Snips — User-Reported Issues
 
-When the user pastes snip metadata (text with \`type:\`, \`frame:\`, \`image:\` fields):
-1. Read the image at the given path — it shows exactly what the user is pointing at
-2. Use the metadata (frame index, source, region) to locate the issue
-3. Fix the specific problem highlighted
+When the user pastes snip metadata (text with \`type:\`, \`frame:\`, \`snip:\` fields):
+1. Call \`get_snips\` with the **current job ID** (the same job ID you used for \`sync\`) — it fetches the snip image and metadata from the engine
+2. The \`jobId\` parameter is the pipeline job UUID, NOT a value from the snip metadata fields
+3. Use the returned image and metadata (frame index, source, region) to locate the issue
+4. Fix the specific problem highlighted
 
 ONLY call \`get_snips\` when the user pastes snip metadata. Never call it proactively.
 Call \`clear_snips\` after fixes are confirmed.`;

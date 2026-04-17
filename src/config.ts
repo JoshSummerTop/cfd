@@ -6,7 +6,7 @@ import { homedir } from "node:os";
 const CFD_DIR = join(homedir(), ".codefromdesign");
 const CONFIG_PATH = join(CFD_DIR, "config.json");
 
-export const DEFAULT_ENGINE_URL = "https://engine.codefromdesign.com";
+export const DEFAULT_ENGINE_URL = "https://beta.codefromdesign.com/api/engine";
 
 export interface CfdConfig {
   engineUrl: string;
