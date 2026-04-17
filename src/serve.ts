@@ -31,7 +31,7 @@ export async function startMcpServer(): Promise<void> {
   const config = await loadConfig();
 
   const server = new McpServer(
-    { name: "cfd", version: "0.8.0" },
+    { name: "cfd", version: "0.8.1" },
     { instructions: HANDSHAKE_INSTRUCTIONS },
   );
 
