@@ -2,8 +2,9 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { readFile, readdir, rm, writeFile, mkdir, stat } from "node:fs/promises";
-import { existsSync } from "node:fs";
-import { join } from "node:path";
+import { appendFileSync, existsSync, mkdirSync } from "node:fs";
+import { homedir } from "node:os";
+import { dirname, join } from "node:path";
 import { loadConfig } from "./config.js";
 import { engineFetch } from "./engine.js";
 import { syncJob, syncFrame, getWorkspacePath, getFrameCleanStatus } from "./sync.js";
@@ -27,11 +28,53 @@ async function walkWebsiteDir(dir: string): Promise<string[]> {
   return files;
 }
 
+// Crash diagnostics: when the MCP server dies (uncaught error, dropped stdio
+// pipe, OOM), Claude Code only reports "MCP server disconnected" with no
+// stack trace. Append every fatal event to a log file BEFORE the process
+// exits so the next disconnect leaves a forensic trail instead of silence.
+const CRASH_LOG_PATH = join(homedir(), ".codefromdesign", "mcp-server.log");
+function logFatal(reason: string, err: unknown): void {
+  try {
+    mkdirSync(dirname(CRASH_LOG_PATH), { recursive: true });
+    const detail = err instanceof Error ? (err.stack ?? err.message) : String(err);
+    appendFileSync(CRASH_LOG_PATH, `[${new Date().toISOString()}] ${reason}: ${detail}\n`);
+  } catch { /* last resort — a crash handler must never throw */ }
+}
+
+function installCrashHandlers(): void {
+  process.on("uncaughtException", (err) => {
+    logFatal("uncaughtException", err);
+    try { console.error("[cfd] uncaughtException:", err); } catch {}
+    process.exit(1);
+  });
+  process.on("unhandledRejection", (reason) => {
+    logFatal("unhandledRejection", reason);
+    try { console.error("[cfd] unhandledRejection:", reason); } catch {}
+    process.exit(1);
+  });
+  // EPIPE on stdout/stderr is the silent killer on Windows: when Claude Code
+  // closes the MCP transport mid-write (e.g. agent context blew the API
+  // request size limit), the next stdout write throws EPIPE. Without a
+  // listener, Node treats it as a fatal error. Catch it, log it, exit(0) —
+  // a closed pipe is a "your client went away" signal, not an error state.
+  const onPipeError = (label: string) => (err: NodeJS.ErrnoException) => {
+    if (err && err.code === "EPIPE") {
+      logFatal(`${label} EPIPE (client closed transport)`, err);
+      process.exit(0);
+    }
+    logFatal(`${label} stream error`, err);
+  };
+  process.stdout.on("error", onPipeError("stdout"));
+  process.stderr.on("error", onPipeError("stderr"));
+}
+
 export async function startMcpServer(): Promise<void> {
+  installCrashHandlers();
+
   const config = await loadConfig();
 
   const server = new McpServer(
-    { name: "cfd", version: "0.10.2" },
+    { name: "cfd", version: "0.10.4" },
     { instructions: HANDSHAKE_INSTRUCTIONS },
   );
 
@@ -676,7 +719,29 @@ export async function startMcpServer(): Promise<void> {
       jobId: z.string().describe("The job ID"),
       frameIndex: z.number().describe("The frame index (0-based)"),
     },
-    async ({ jobId, frameIndex }) => {
+    async ({ jobId, frameIndex }, extra) => {
+      // Heartbeat: emit progress notifications during the long engine call so
+      // clients with resetTimeoutOnProgress reset their request timer instead
+      // of hitting the 60s default and dropping the transport.
+      const progressToken = (extra as any)?._meta?.progressToken;
+      let heartbeatTimer: ReturnType<typeof setInterval> | undefined;
+      const startHeartbeat = (label: string) => {
+        if (!progressToken || !(extra as any)?.sendNotification) return;
+        let tick = 0;
+        heartbeatTimer = setInterval(() => {
+          tick += 1;
+          (extra as any).sendNotification({
+            method: "notifications/progress",
+            params: { progressToken, progress: tick, total: 0, message: label },
+          }).catch(() => { /* swallow — heartbeat must never throw */ });
+        }, 5_000);
+      };
+      const stopHeartbeat = () => {
+        if (heartbeatTimer) {
+          clearInterval(heartbeatTimer);
+          heartbeatTimer = undefined;
+        }
+      };
       try {
         // Read cleaned.html from workspace
         const wsPath = getWorkspacePath(jobId);
@@ -708,6 +773,7 @@ export async function startMcpServer(): Promise<void> {
           } catch { /* treat as zero */ }
         }
         if (priorIterationCount >= MAX_COMPARE_ITERATIONS) {
+          stopHeartbeat();
           return {
             content: [{
               type: "text",
@@ -725,7 +791,8 @@ export async function startMcpServer(): Promise<void> {
           };
         }
 
-        // Send to engine for screenshot + diff
+        // Send to engine for screenshot + diff (long call — start heartbeat)
+        startHeartbeat("rendering + diffing on engine");
         const res = await engineFetch(config, `/api/jobs/${jobId}/frames/${frameIndex}/compare`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -733,6 +800,7 @@ export async function startMcpServer(): Promise<void> {
         });
 
         if (!res.ok) {
+          stopHeartbeat();
           const body = await res.text();
           return { content: [{ type: "text", text: `Compare failed: ${res.status} ${body}` }] };
         }
@@ -1087,8 +1155,10 @@ export async function startMcpServer(): Promise<void> {
           await writeFile(notesPath, prior + autoLine, "utf-8");
         } catch { /* non-critical; don't fail the compare just because notes failed */ }
 
+        stopHeartbeat();
         return { content };
       } catch (err: any) {
+        stopHeartbeat();
         return { content: [{ type: "text", text: `Compare failed: ${err.message}` }] };
       }
     }
@@ -1182,5 +1252,5 @@ export async function startMcpServer(): Promise<void> {
 
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  console.error("[cfd] mcp server started");
+  console.error(`[cfd] mcp server started (v0.10.4, crash log: ${CRASH_LOG_PATH})`);
 }
