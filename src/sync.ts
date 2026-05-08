@@ -281,6 +281,15 @@ export interface FrameSummary {
   parity: string;
   images: string;
   warnings?: string[];
+  /**
+   * "unchanged" — frame was carried over wholesale from a parent job; the
+   *   workspace already has v5's cleaned.html and the .submitted marker.
+   * "scaffolded" — node ID matched but content changed; v5's cleaned.html
+   *   landed at the local cleaned.html as a starting point. User still
+   *   iterates and submits.
+   * undefined — fresh frame.
+   */
+  carriedOver?: "unchanged" | "scaffolded";
 }
 
 const CRITICAL_ARTIFACTS = new Set(["ai-ready.html", "figma-screenshot.png"]);
@@ -385,6 +394,55 @@ async function syncFrameArtifacts(
     }
   } catch { /* skip */ }
 
+  // Carry-over awareness. The engine sets frame.carriedOver when this frame
+  // was matched against a parent job. Two cases to materialize locally:
+  //
+  //   "unchanged": the parent's cleaned.html + cleaned-screenshot were copied
+  //     to this job's prefix server-side. Pull cleaned.html down so the user
+  //     can see it, and write the .submitted marker so build gates and the
+  //     agent's clean loop both treat the frame as done.
+  //
+  //   "scaffolded": the parent's cleaned.html is at cleaned-scaffold.html on
+  //     the server. Land it as the local cleaned.html so the user starts
+  //     iterating from v5's hand-cleaned HTML rather than ai-ready.html.
+  //     Don't write .submitted — the user still needs to validate against
+  //     v6's screenshot.
+  let carriedOverKind: "unchanged" | "scaffolded" | undefined;
+  if (frame.carriedOver && (frame.carriedOver.kind === "unchanged" || frame.carriedOver.kind === "scaffolded")) {
+    carriedOverKind = frame.carriedOver.kind;
+    try {
+      if (carriedOverKind === "unchanged") {
+        const res = await engineFetch(config, `/api/jobs/${jobId}/frames/${frameIndex}/cleaned-html`);
+        if (res.ok) {
+          const data = Buffer.from(await res.arrayBuffer());
+          await writeFile(join(frameDir, "cleaned.html"), data);
+          // .submitted marker tells getFrameCleanStatus + the agent loop
+          // that this frame needs no further work. Build gate sees it as done.
+          await writeFile(join(frameDir, ".submitted"), `carried-over from job ${frame.carriedOver.fromJobId} frame ${frame.carriedOver.fromFrameIdx}\n`);
+          console.error(`[cfd] frame ${frameIndex}: carried over (unchanged), .submitted marker written`);
+        } else {
+          console.error(`[cfd] frame ${frameIndex}: carry-over flag set but cleaned.html fetch failed (${res.status}); frame will appear uncleaned`);
+        }
+      } else {
+        const res = await engineFetch(config, `/api/jobs/${jobId}/frames/${frameIndex}/artifact/cleaned-scaffold.html`);
+        if (res.ok) {
+          const data = Buffer.from(await res.arrayBuffer());
+          // Write to cleaned.html — init_cleaned_frame's existing
+          // "don't overwrite" guard then prevents this from being
+          // clobbered by ai-ready.html on a subsequent init call.
+          await writeFile(join(frameDir, "cleaned.html"), data);
+          console.error(`[cfd] frame ${frameIndex}: scaffolded from job ${frame.carriedOver.fromJobId}, cleaned.html prefilled`);
+        } else {
+          console.error(`[cfd] frame ${frameIndex}: scaffold fetch failed (${res.status}); user will start from ai-ready.html`);
+          carriedOverKind = undefined;
+        }
+      }
+    } catch (err: any) {
+      console.error(`[cfd] frame ${frameIndex}: carry-over materialization failed: ${err.message}`);
+      carriedOverKind = undefined;
+    }
+  }
+
   const summary: FrameSummary = {
     index: frameIndex,
     name: frameName,
@@ -393,9 +451,10 @@ async function syncFrameArtifacts(
     parity: `${(frame.parityScore ?? 0).toFixed(1)}%`,
     images: `${imagesDownloaded}/${imagesTotal}`,
     warnings: missingCritical.length > 0 ? missingCritical : undefined,
+    carriedOver: carriedOverKind,
   };
 
-  console.error(`[cfd] synced frame ${frameIndex}: ${summary.name} (images: ${imagesDownloaded}/${imagesTotal})`);
+  console.error(`[cfd] synced frame ${frameIndex}: ${summary.name} (images: ${imagesDownloaded}/${imagesTotal})${carriedOverKind ? ` [${carriedOverKind}]` : ""}`);
   return summary;
 }
 
@@ -437,6 +496,11 @@ export async function syncJob(
   workspacePath: string;
   frameCount: number;
   frames: FrameSummary[];
+  parentJobId?: string;
+  carryover?: {
+    unchanged: number;
+    scaffolded: number;
+  };
 }> {
   const jobRes = await engineFetch(config, `/api/jobs/${jobId}`);
   if (!jobRes.ok) {
@@ -461,6 +525,7 @@ export async function syncJob(
     figmaUrl: job.figmaUrl,
     createdAt: job.createdAt,
     completedAt: job.completedAt,
+    parentJobId: job.parentJobId,
     stages: job.stages?.map((s: any) => ({
       name: s.name,
       status: s.status,
@@ -477,6 +542,13 @@ export async function syncJob(
       parityBreakdown: f.parityBreakdown,
       correctionIterations: f.correctionIterations,
       issues: f.issues,
+      carriedOver: f.carriedOver
+        ? {
+            kind: f.carriedOver.kind,
+            fromJobId: f.carriedOver.fromJobId,
+            fromFrameIdx: f.carriedOver.fromFrameIdx,
+          }
+        : undefined,
     })),
   };
   await writeFile(join(wsPath, "job.json"), JSON.stringify(jobMeta, null, 2));
@@ -509,12 +581,23 @@ export async function syncJob(
   await createLogStructure(wsPath);
   console.error(`[cfd] created logs/ directory structure`);
 
+  const unchangedCount = frameSummaries.filter((s) => s.carriedOver === "unchanged").length;
+  const scaffoldedCount = frameSummaries.filter((s) => s.carriedOver === "scaffolded").length;
+  const carryover = unchangedCount + scaffoldedCount > 0
+    ? { unchanged: unchangedCount, scaffolded: scaffoldedCount }
+    : undefined;
+
+  if (carryover) {
+    console.error(`[cfd] carry-over from ${job.parentJobId}: ${unchangedCount} unchanged, ${scaffoldedCount} scaffolded`);
+  }
   console.error(`[cfd] sync complete: ${frames.length} frames -> ${wsPath}`);
 
   return {
     workspacePath: wsPath,
     frameCount: frames.length,
     frames: frameSummaries,
+    parentJobId: job.parentJobId,
+    carryover,
   };
 }
 

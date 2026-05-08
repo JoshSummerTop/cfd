@@ -74,7 +74,7 @@ export async function startMcpServer(): Promise<void> {
   const config = await loadConfig();
 
   const server = new McpServer(
-    { name: "cfd", version: "0.10.4" },
+    { name: "cfd", version: "0.11.0" },
     { instructions: HANDSHAKE_INSTRUCTIONS },
   );
 
@@ -141,12 +141,39 @@ export async function startMcpServer(): Promise<void> {
           }
         }
 
+        // Carry-over banner — most important context for the agent loop
+        // because "unchanged" frames already have .submitted markers and
+        // should be skipped during cleaning.
+        const carryoverLines: string[] = [];
+        if (result.parentJobId) {
+          carryoverLines.push(`\u{1F517} Linked to parent job: ${result.parentJobId}`);
+          if (result.carryover) {
+            const c = result.carryover;
+            const fresh = result.frameCount - c.unchanged - c.scaffolded;
+            carryoverLines.push(
+              `Carry-over: ${c.unchanged} unchanged (already submitted), ${c.scaffolded} scaffolded (start from v5's cleaned.html), ${fresh} fresh.`
+            );
+            if (c.unchanged > 0) {
+              carryoverLines.push(
+                `\u{2713} Skip the ${c.unchanged} unchanged frame(s) — they already have .submitted markers. Focus on the scaffolded + fresh frames.`
+              );
+            }
+            if (c.scaffolded > 0) {
+              carryoverLines.push(
+                `For scaffolded frames, cleaned.html is pre-filled from v5. DO NOT call init_cleaned_frame on those — iterate from the scaffold.`
+              );
+            }
+          }
+          carryoverLines.push(``);
+        }
+
         return {
           content: [{
             type: "text",
             text: [
               // Surface warnings first — most important
               ...(allWarnings.length > 0 ? [...allWarnings, ``] : []),
+              ...carryoverLines,
               `Synced job ${jobId} to workspace.`,
               ``,
               `Workspace: ${result.workspacePath}`,
@@ -158,9 +185,14 @@ export async function startMcpServer(): Promise<void> {
               `    build-guide.json            -- page-to-frame mapping, breakpoints, output structure`,
               `    logs/                       -- session and frame logs (see instructions)`,
               `    frames/`,
-              ...result.frames.map((f) =>
-                `      ${f.index}/                   -- ${f.name} (${f.width}x${f.height}, parity: ${f.parity}, images: ${f.images})`
-              ),
+              ...result.frames.map((f) => {
+                const tag = f.carriedOver === "unchanged"
+                  ? " [CARRIED — already submitted]"
+                  : f.carriedOver === "scaffolded"
+                    ? " [SCAFFOLDED from v5 — iterate]"
+                    : "";
+                return `      ${f.index}/                   -- ${f.name} (${f.width}x${f.height}, parity: ${f.parity}, images: ${f.images})${tag}`;
+              }),
               ``,
               `Each frame directory contains:`,
               `  ai-ready.html         -- YOUR PRIMARY INPUT (DOM with data-image-ref/data-svg-id placeholders)`,
@@ -232,6 +264,47 @@ export async function startMcpServer(): Promise<void> {
         };
       } catch (err: any) {
         return { content: [{ type: "text", text: `Sync frame failed: ${err.message}` }] };
+      }
+    }
+  );
+
+  // --- Tool: force_reclean_frame ---
+  // Escape hatch when carryover guessed wrong. Calls the engine's
+  // /force-reclean endpoint which clears the carry-over flags + re-runs
+  // render+parity. After this, you typically resync and call init_cleaned_frame
+  // --force locally to start from fresh ai-ready.html.
+  server.tool(
+    "force_reclean_frame",
+    "Force a carried-over frame back into the standard pipeline. Use ONLY when you suspect the carry-over decision was wrong (e.g. v6 visually differs from v5 but was marked unchanged). Clears the server-side carry-over flags, re-renders the frame, and re-measures parity. Errors if the frame was not carried over. After this, sync the frame and (if you want a fresh starting point) call init_cleaned_frame with force:true.",
+    {
+      jobId: z.string().describe("The job ID"),
+      frameIndex: z.number().describe("The frame index (0-based)"),
+    },
+    async ({ jobId, frameIndex }) => {
+      try {
+        const res = await engineFetch(config, `/api/jobs/${jobId}/frames/${frameIndex}/force-reclean`, {
+          method: "POST",
+        });
+        if (!res.ok) {
+          const body = await res.text();
+          return { content: [{ type: "text", text: `force_reclean_frame failed: ${res.status} ${res.statusText}\n${body}` }] };
+        }
+        const result: any = await res.json();
+        return {
+          content: [{
+            type: "text",
+            text: [
+              `Force-reclean complete for frame ${frameIndex}.`,
+              `New parity: ${(result.parityScore ?? 0).toFixed(1)}% (non-font: ${(result.nonFontParity ?? 0).toFixed(1)}%)`,
+              ``,
+              `Next steps:`,
+              `  1. Run sync_frame ${jobId} ${frameIndex} to refresh local artifacts.`,
+              `  2. If you want to start cleaning from scratch, call init_cleaned_frame with force:true (the carried v5 cleaned.html will be discarded).`,
+            ].join("\n"),
+          }],
+        };
+      } catch (err: any) {
+        return { content: [{ type: "text", text: `force_reclean_frame failed: ${err.message}` }] };
       }
     }
   );
@@ -1252,5 +1325,5 @@ export async function startMcpServer(): Promise<void> {
 
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  console.error(`[cfd] mcp server started (v0.10.4, crash log: ${CRASH_LOG_PATH})`);
+  console.error(`[cfd] mcp server started (v0.11.0, crash log: ${CRASH_LOG_PATH})`);
 }
